@@ -7281,15 +7281,15 @@ function renderMobileSiteCards(sites) {
         cardHeader.className = 'mobile-card-header';
         const isSiteUp = site.last_status === 'UP';
         const titleHtml = isSiteUp && site.name
-            ? `<a href="${site.url}" target="_blank" rel="noopener noreferrer" class="site-name-link">${site.name}</a>`
+            ? \`<a href="\${site.url}" target="_blank" rel="noopener noreferrer" class="site-name-link">\${site.name}</a>\`
             : (site.name || '未命名网站');
-        cardHeader.innerHTML = `
+        cardHeader.innerHTML = \`
             <div style="flex: 1;"></div>
-            <h6 class="mobile-card-title text-center" style="flex: 1;">${titleHtml}</h6>
+            <h6 class="mobile-card-title text-center" style="flex: 1;">\${titleHtml}</h6>
             <div style="flex: 1; display: flex; justify-content: flex-end;">
-                <span class="badge ${statusInfo.class}">${statusInfo.text}</span>
+                <span class="badge \${statusInfo.class}">\${statusInfo.text}</span>
             </div>
-        `;
+        \`;
 
         // 卡片主体
         const cardBody = document.createElement('div');
@@ -7560,16 +7560,16 @@ async function renderSiteStatusTable(sites) {
         const isSiteUp = site.last_status === 'UP';
         const nameHtml = site.name
             ? (isSiteUp
-                ? `<a href="${site.url}" target="_blank" rel="noopener noreferrer" class="site-name-link">${site.name}</a>`
+                ? \`<a href="\${site.url}" target="_blank" rel="noopener noreferrer" class="site-name-link">\${site.name}</a>\`
                 : site.name)
             : '-';
-        row.innerHTML = `
-            <td>${nameHtml}</td>
-            <td><span class="badge ${statusInfo.class}">${statusInfo.text}</span></td>
-            <td>${site.last_status_code || '-'}</td>
-            <td>${responseTime}</td>
-            <td>${lastCheckTime}</td>
-        `;
+        row.innerHTML = \`
+            <td>\${nameHtml}</td>
+            <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
+            <td>\${site.last_status_code || '-'}</td>
+            <td>\${responseTime}</td>
+            <td>\${lastCheckTime}</td>
+        \`;
         row.appendChild(historyCell);
         tableBody.appendChild(row);
 
