@@ -2575,7 +2575,7 @@ async function handleApiRequest(request, env, ctx) {
       const isAdmin = user !== null;
 
       let query = `
-        SELECT id, name, last_checked, last_status, last_status_code, last_response_time_ms
+        SELECT id, name, url, last_checked, last_status, last_status_code, last_response_time_ms
         FROM monitored_sites
       `;
       if (!isAdmin) {
