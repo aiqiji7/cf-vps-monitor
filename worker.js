@@ -2800,6 +2800,31 @@ async function handleApiRequest(request, env, ctx) {
     }
   }
 
+  // 批量重排LLM端点（管理员）
+  if (path === '/api/admin/llm-endpoints/batch-reorder' && method === 'POST') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const { endpointIds } = await parseJsonSafely(request);
+      if (!Array.isArray(endpointIds) || endpointIds.length === 0) {
+        return createErrorResponse('Invalid request', '端点ID数组无效', 400, corsHeaders);
+      }
+
+      const updateStmts = endpointIds.map((id, index) =>
+        env.DB.prepare('UPDATE monitored_llm_endpoints SET sort_order = ? WHERE id = ?').bind(index, id)
+      );
+
+      await env.DB.batch(updateStmts);
+
+      return createSuccessResponse({ message: '排序已更新' }, corsHeaders);
+    } catch (error) {
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
   // 更新LLM端点（管理员）
   if (path.match(/\/api\/admin\/llm-endpoints\/[^\/]+$/) && method === 'PUT') {
     const user = await authenticateRequest(request, env);
@@ -4546,39 +4571,42 @@ function getIndexHtml() {
         }
 
         /* 拖拽排序样式 */
-        .server-row-draggable, .site-row-draggable {
+        .server-row-draggable, .site-row-draggable, .llm-row-draggable {
             transition: all 0.2s ease;
         }
-        .server-row-draggable:hover, .site-row-draggable:hover {
+        .server-row-draggable:hover, .site-row-draggable:hover, .llm-row-draggable:hover {
             background-color: rgba(0, 123, 255, 0.1) !important;
         }
-        .server-row-draggable.drag-over-top, .site-row-draggable.drag-over-top {
+        .server-row-draggable.drag-over-top, .site-row-draggable.drag-over-top, .llm-row-draggable.drag-over-top {
             border-top: 3px solid #007bff !important;
             background-color: rgba(0, 123, 255, 0.1) !important;
         }
-        .server-row-draggable.drag-over-bottom, .site-row-draggable.drag-over-bottom {
+        .server-row-draggable.drag-over-bottom, .site-row-draggable.drag-over-bottom, .llm-row-draggable.drag-over-bottom {
             border-bottom: 3px solid #007bff !important;
             background-color: rgba(0, 123, 255, 0.1) !important;
         }
-        .server-row-draggable[draggable="true"], .site-row-draggable[draggable="true"] {
+        .server-row-draggable[draggable="true"], .site-row-draggable[draggable="true"], .llm-row-draggable[draggable="true"] {
             cursor: grab;
         }
-        .server-row-draggable[draggable="true"]:active, .site-row-draggable[draggable="true"]:active {
+        .server-row-draggable[draggable="true"]:active, .site-row-draggable[draggable="true"]:active, .llm-row-draggable[draggable="true"]:active {
             cursor: grabbing;
         }
 
         /* 暗色主题下的拖拽样式 */
         [data-bs-theme="dark"] .server-row-draggable:hover,
-        [data-bs-theme="dark"] .site-row-draggable:hover {
+        [data-bs-theme="dark"] .site-row-draggable:hover,
+        [data-bs-theme="dark"] .llm-row-draggable:hover {
             background-color: rgba(13, 110, 253, 0.2) !important;
         }
         [data-bs-theme="dark"] .server-row-draggable.drag-over-top,
-        [data-bs-theme="dark"] .site-row-draggable.drag-over-top {
+        [data-bs-theme="dark"] .site-row-draggable.drag-over-top,
+        [data-bs-theme="dark"] .llm-row-draggable.drag-over-top {
             border-top: 3px solid #0d6efd !important;
             background-color: rgba(13, 110, 253, 0.2) !important;
         }
         [data-bs-theme="dark"] .server-row-draggable.drag-over-bottom,
-        [data-bs-theme="dark"] .site-row-draggable.drag-over-bottom {
+        [data-bs-theme="dark"] .site-row-draggable.drag-over-bottom,
+        [data-bs-theme="dark"] .llm-row-draggable.drag-over-bottom {
             border-bottom: 3px solid #0d6efd !important;
             background-color: rgba(13, 110, 253, 0.2) !important;
         }
@@ -5370,6 +5398,7 @@ function getAdminHtml() {
                         <table class="table table-striped table-hover">
                             <thead>
                                 <tr>
+                                    <th style="width:30px"></th>
                                     <th>模型</th>
                                     <th>API URL</th>
                                     <th>状态</th>
@@ -5382,7 +5411,7 @@ function getAdminHtml() {
                             </thead>
                             <tbody id="llmEndpointTableBody">
                                 <tr>
-                                    <td colspan="8" class="text-center">加载中...</td>
+                                    <td colspan="9" class="text-center">加载中...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -10442,19 +10471,22 @@ function renderLlmEndpointTable(endpoints) {
     tableBody.innerHTML = '';
 
     if (endpoints.length === 0) {
-        tableBody.innerHTML = '<tr><td colspan="8" class="text-center">暂无LLM端点</td></tr>';
+        tableBody.innerHTML = '<tr><td colspan="9" class="text-center">暂无LLM端点</td></tr>';
         return;
     }
 
     endpoints.forEach((ep) => {
         const row = document.createElement('tr');
         row.setAttribute('data-llm-id', ep.id);
+        row.classList.add('llm-row-draggable');
+        row.draggable = true;
 
         const statusInfo = getSiteStatusBadge(ep.last_status);
         const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
         const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
 
         row.innerHTML = \`
+            <td><i class="bi bi-grip-vertical text-muted me-2" style="cursor: grab;" title="拖拽排序"></i></td>
             <td><span class="badge bg-info">\${ep.model}</span></td>
             <td><a href="\${ep.api_url}" target="_blank" rel="noopener noreferrer" class="text-truncate d-inline-block" style="max-width:200px;">\${ep.api_url}</a></td>
             <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
@@ -10509,6 +10541,132 @@ function renderLlmEndpointTable(endpoints) {
             }
         });
     });
+
+    // 初始化拖拽排序
+    initializeLlmDragSort();
+}
+
+// 初始化LLM端点拖拽排序
+function initializeLlmDragSort() {
+    const tableBody = document.getElementById('llmEndpointTableBody');
+    if (!tableBody) return;
+
+    let draggedElement = null;
+    let draggedOverElement = null;
+
+    // 为所有可拖拽行添加事件监听
+    const draggableRows = tableBody.querySelectorAll('.llm-row-draggable');
+
+    draggableRows.forEach(row => {
+        row.addEventListener('dragstart', function(e) {
+            draggedElement = this;
+            this.style.opacity = '0.5';
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/html', this.outerHTML);
+        });
+
+        row.addEventListener('dragend', function(e) {
+            this.style.opacity = '';
+            draggedElement = null;
+            draggedOverElement = null;
+
+            // 移除所有拖拽样式
+            draggableRows.forEach(r => {
+                r.classList.remove('drag-over-top', 'drag-over-bottom');
+            });
+        });
+
+        row.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+
+            if (this === draggedElement) return;
+
+            draggedOverElement = this;
+
+            // 移除其他行的拖拽样式
+            draggableRows.forEach(r => {
+                if (r !== this) {
+                    r.classList.remove('drag-over-top', 'drag-over-bottom');
+                }
+            });
+
+            // 确定插入位置
+            const rect = this.getBoundingClientRect();
+            const midpoint = rect.top + rect.height / 2;
+
+            if (e.clientY < midpoint) {
+                this.classList.add('drag-over-top');
+                this.classList.remove('drag-over-bottom');
+            } else {
+                this.classList.add('drag-over-bottom');
+                this.classList.remove('drag-over-top');
+            }
+        });
+
+        row.addEventListener('drop', function(e) {
+            e.preventDefault();
+
+            if (this === draggedElement) return;
+
+            const draggedEndpointId = draggedElement.getAttribute('data-llm-id');
+            const targetEndpointId = this.getAttribute('data-llm-id');
+
+            // 确定插入位置
+            const rect = this.getBoundingClientRect();
+            const midpoint = rect.top + rect.height / 2;
+            const insertBefore = e.clientY < midpoint;
+
+            // 执行拖拽排序
+            performLlmDragSort(draggedEndpointId, targetEndpointId, insertBefore);
+        });
+    });
+}
+
+// 执行LLM端点拖拽排序
+async function performLlmDragSort(draggedEndpointId, targetEndpointId, insertBefore) {
+    try {
+        // 获取当前LLM端点列表的ID顺序
+        const currentOrder = llmEndpointList.map(ep => ep.id);
+
+        // 计算新的排序
+        const draggedIndex = currentOrder.indexOf(draggedEndpointId);
+        const targetIndex = currentOrder.indexOf(targetEndpointId);
+
+        if (draggedIndex === -1 || targetIndex === -1) {
+            throw new Error('无法找到LLM端点');
+        }
+
+        // 创建新的排序数组
+        const newOrder = [...currentOrder];
+        newOrder.splice(draggedIndex, 1); // 移除拖拽的元素
+
+        // 计算插入位置
+        let insertIndex = targetIndex;
+        if (draggedIndex < targetIndex) {
+            insertIndex = targetIndex - 1;
+        }
+        if (!insertBefore) {
+            insertIndex += 1;
+        }
+
+        newOrder.splice(insertIndex, 0, draggedEndpointId); // 插入到新位置
+
+        // 发送批量排序请求
+        await apiRequest('/api/admin/llm-endpoints/batch-reorder', {
+            method: 'POST',
+            body: JSON.stringify({ endpointIds: newOrder })
+        });
+
+        // 重新加载LLM端点列表
+        await loadLlmEndpointList();
+        showToast('success', 'LLM端点排序已更新');
+
+    } catch (error) {
+                showToast('danger', '拖拽排序失败: ' + error.message);
+        // 重新加载以恢复原始状态
+        loadLlmEndpointList();
+    }
 }
 
 // 显示添加/编辑LLM端点模态框
