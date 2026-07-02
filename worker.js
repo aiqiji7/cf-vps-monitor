@@ -2550,6 +2550,38 @@ async function handleApiRequest(request, env, ctx) {
     }
   }
 
+  // 将模型输入解析为模型名称数组（后端通用工具）
+  function parseModelsInput(model, models) {
+    let modelList = [];
+    if (Array.isArray(models)) {
+      modelList = models.map(m => {
+        if (typeof m === 'string') return m.trim();
+        if (m && typeof m === 'object' && m.model) return m.model.trim();
+        return '';
+      }).filter(Boolean);
+    } else if (typeof models === 'string' && models.trim()) {
+      // 尝试 JSON 数组字符串
+      if (models.trim().startsWith('[')) {
+        try {
+          const parsed = JSON.parse(models.trim());
+          if (Array.isArray(parsed)) {
+            modelList = parsed.map(m => typeof m === 'string' ? m.trim() : (m.model || '').trim()).filter(Boolean);
+          }
+        } catch (e) { /* fall through */ }
+      }
+      if (modelList.length === 0) {
+        modelList = models.split(/[\n,]+/).map(m => m.trim()).filter(Boolean);
+      }
+    }
+    // 去重
+    modelList = [...new Set(modelList)];
+    // 回退到单 model 字段
+    if (modelList.length === 0 && model && model.trim()) {
+      modelList = [model.trim()];
+    }
+    return modelList;
+  }
+
   // 添加LLM端点（管理员）
   if (path === '/api/admin/llm-endpoints' && method === 'POST') {
     const user = await authenticateRequest(request, env);
@@ -2560,7 +2592,7 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const { api_url, api_key, model, check_prompt, expected_contains, timeout_ms } = await parseJsonSafely(request);
+      const { api_url, api_key, model, models, check_prompt, expected_contains, timeout_ms } = await parseJsonSafely(request);
 
       if (!api_url || !isValidHttpUrl(api_url)) {
         return new Response(JSON.stringify({ error: 'Valid API URL is required', message: '请输入有效的API URL' }), {
@@ -2568,46 +2600,190 @@ async function handleApiRequest(request, env, ctx) {
         });
       }
 
-      if (!model || !model.trim()) {
-        return new Response(JSON.stringify({ error: 'Model is required', message: '请输入模型名称' }), {
+      const modelList = parseModelsInput(model, models);
+      if (modelList.length === 0) {
+        return new Response(JSON.stringify({ error: 'Model is required', message: '请输入至少一个模型名称' }), {
           status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
 
-      const endpointId = Math.random().toString(36).substring(2, 12);
       const addedAt = Math.floor(Date.now() / 1000);
+      const checkPrompt = check_prompt || 'Say hello in one word';
+      const expectedContains = expected_contains || '';
+      const timeoutMs = timeout_ms || 30000;
+      const apiKey = api_key || '';
 
+      // 获取当前最大 sort_order
       const maxOrderResult = await env.DB.prepare(
         'SELECT MAX(sort_order) as max_order FROM monitored_llm_endpoints'
       ).first();
-      const nextSortOrder = (maxOrderResult?.max_order && typeof maxOrderResult.max_order === 'number')
+      let nextSortOrder = (maxOrderResult?.max_order && typeof maxOrderResult.max_order === 'number')
         ? maxOrderResult.max_order + 1 : 0;
 
-      await env.DB.prepare(`
-        INSERT INTO monitored_llm_endpoints (id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).bind(
-        endpointId, api_url, api_key || '', model.trim(),
-        check_prompt || 'Say hello in one word', expected_contains || '',
-        timeout_ms || 30000, addedAt, 'PENDING', nextSortOrder
-      ).run();
+      const insertStmts = [];
+      const newEndpoints = [];
 
-      const endpointData = { id: endpointId, api_url, model: model.trim(), added_at: addedAt, last_status: 'PENDING', sort_order: nextSortOrder };
-
-      // 立即执行健康检查
-      const newEndpoint = { id: endpointId, api_url, api_key, model: model.trim(), check_prompt, expected_contains, timeout_ms };
-      if (ctx?.waitUntil) {
-        ctx.waitUntil(checkLlmEndpointStatus(newEndpoint, env.DB, ctx));
-      } else {
-        checkLlmEndpointStatus(newEndpoint, env.DB, ctx).catch(() => {});
+      for (const mdl of modelList) {
+        const endpointId = Math.random().toString(36).substring(2, 12);
+        insertStmts.push(
+          env.DB.prepare(`
+            INSERT INTO monitored_llm_endpoints (id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(endpointId, api_url, apiKey, mdl, checkPrompt, expectedContains, timeoutMs, addedAt, 'PENDING', nextSortOrder)
+        );
+        newEndpoints.push({
+          id: endpointId, api_url, api_key: apiKey,
+          model: mdl, check_prompt: checkPrompt,
+          expected_contains: expectedContains,
+          timeout_ms: timeoutMs,
+          added_at: addedAt, last_status: 'PENDING', sort_order: nextSortOrder
+        });
+        nextSortOrder++;
       }
 
-      return new Response(JSON.stringify({ endpoint: endpointData }), {
+      // 批量插入
+      await env.DB.batch(insertStmts);
+
+      // 为每个新端点触发健康检查
+      for (const ep of newEndpoints) {
+        if (ctx?.waitUntil) {
+          ctx.waitUntil(checkLlmEndpointStatus(ep, env.DB, ctx));
+        } else {
+          checkLlmEndpointStatus(ep, env.DB, ctx).catch(() => {});
+        }
+      }
+
+      // 返回兼容格式
+      return new Response(JSON.stringify({
+        endpoint: newEndpoints[0],
+        endpoints: newEndpoints,
+        count: newEndpoints.length
+      }), {
         status: 201, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
       if (error.message.includes('UNIQUE constraint failed')) {
         return new Response(JSON.stringify({ error: 'Duplicate entry', message: '该端点已存在' }), {
+          status: 409, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+      if (error.message.includes('no such table')) {
+        try {
+          await env.DB.exec(D1_SCHEMAS.monitored_llm_endpoints);
+          await env.DB.exec(D1_SCHEMAS.llm_status_history);
+          return new Response(JSON.stringify({ error: 'Database table created, please retry', message: '数据库表已创建，请重试' }), {
+            status: 503, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+          });
+        } catch (createError) {}
+      }
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // 批量添加LLM端点（管理员）
+  if (path === '/api/admin/llm-endpoints/batch' && method === 'POST') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ error: 'Unauthorized', message: '需要管理员权限' }), {
+        status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+
+    try {
+      const body = await parseJsonSafely(request);
+      const endpoints = body.endpoints;
+
+      if (!Array.isArray(endpoints) || endpoints.length === 0) {
+        return new Response(JSON.stringify({ error: 'Invalid request', message: '端点数组不能为空' }), {
+          status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      // 验证所有端点
+      for (let i = 0; i < endpoints.length; i++) {
+        const ep = endpoints[i];
+        if (!ep.api_url || !isValidHttpUrl(ep.api_url)) {
+          return new Response(JSON.stringify({
+            error: 'Validation failed',
+            message: `第 ${i + 1} 个端点: 请输入有效的API URL`
+          }), {
+            status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+          });
+        }
+        if (!ep.model || !ep.model.trim()) {
+          return new Response(JSON.stringify({
+            error: 'Validation failed',
+            message: `第 ${i + 1} 个端点: 请输入模型名称`
+          }), {
+            status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+          });
+        }
+      }
+
+      // 获取当前最大 sort_order
+      const maxOrderResult = await env.DB.prepare(
+        'SELECT MAX(sort_order) as max_order FROM monitored_llm_endpoints'
+      ).first();
+      let nextSortOrder = (maxOrderResult?.max_order && typeof maxOrderResult.max_order === 'number')
+        ? maxOrderResult.max_order + 1 : 0;
+
+      const addedAt = Math.floor(Date.now() / 1000);
+      const insertStmts = [];
+      const newEndpoints = [];
+
+      for (const ep of endpoints) {
+        const endpointId = Math.random().toString(36).substring(2, 12);
+        const apiUrl = ep.api_url;
+        const apiKey = ep.api_key || '';
+        const model = ep.model.trim();
+        const checkPrompt = ep.check_prompt || 'Say hello in one word';
+        const expectedContains = ep.expected_contains || '';
+        const timeoutMs = ep.timeout_ms || 30000;
+
+        insertStmts.push(
+          env.DB.prepare(`
+            INSERT INTO monitored_llm_endpoints (id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(
+            endpointId, apiUrl, apiKey, model,
+            checkPrompt, expectedContains,
+            timeoutMs, addedAt, 'PENDING', nextSortOrder
+          )
+        );
+
+        newEndpoints.push({
+          id: endpointId, api_url: apiUrl, api_key: apiKey,
+          model, check_prompt: checkPrompt,
+          expected_contains: expectedContains,
+          timeout_ms: timeoutMs,
+          added_at: addedAt, last_status: 'PENDING', sort_order: nextSortOrder
+        });
+
+        nextSortOrder++;
+      }
+
+      // 批量插入
+      await env.DB.batch(insertStmts);
+
+      // 为每个新端点触发健康检查
+      for (const ep of newEndpoints) {
+        if (ctx?.waitUntil) {
+          ctx.waitUntil(checkLlmEndpointStatus(ep, env.DB, ctx));
+        } else {
+          checkLlmEndpointStatus(ep, env.DB, ctx).catch(() => {});
+        }
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        count: newEndpoints.length,
+        message: `成功添加 ${newEndpoints.length} 个LLM端点`
+      }), {
+        status: 201, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      if (error.message.includes('UNIQUE constraint failed')) {
+        return new Response(JSON.stringify({ error: 'Duplicate entry', message: '存在重复的端点' }), {
           status: 409, headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       }
@@ -2637,27 +2813,85 @@ async function handleApiRequest(request, env, ctx) {
         return createErrorResponse('Invalid endpoint ID', '无效的端点ID', 400, corsHeaders);
       }
 
-      const { api_url, api_key, model, check_prompt, expected_contains, timeout_ms } = await request.json();
+      const { api_url, api_key, model, models, check_prompt, expected_contains, timeout_ms } = await request.json();
       if (!api_url || !api_url.trim()) {
         return createErrorResponse('Invalid API URL', 'API URL不能为空', 400, corsHeaders);
       }
-      if (!model || !model.trim()) {
-        return createErrorResponse('Invalid model', '模型名称不能为空', 400, corsHeaders);
+
+      const modelList = parseModelsInput(model, models);
+      if (modelList.length === 0) {
+        return createErrorResponse('Invalid model', '请输入至少一个模型名称', 400, corsHeaders);
       }
 
+      const apiUrl = api_url.trim();
+      const apiKey = api_key || '';
+      const checkPrompt = check_prompt || 'Say hello in one word';
+      const expectedContains = expected_contains || '';
+      const timeoutMs = timeout_ms || 30000;
+
+      // 第一个模型：更新当前端点
       const info = await env.DB.prepare(`
         UPDATE monitored_llm_endpoints SET api_url = ?, api_key = ?, model = ?, check_prompt = ?, expected_contains = ?, timeout_ms = ? WHERE id = ?
       `).bind(
-        api_url.trim(), api_key || '', model.trim(),
-        check_prompt || 'Say hello in one word', expected_contains || '',
-        timeout_ms || 30000, endpointId
+        apiUrl, apiKey, modelList[0],
+        checkPrompt, expectedContains,
+        timeoutMs, endpointId
       ).run();
 
       if (info.changes === 0) {
         return createErrorResponse('Endpoint not found', '端点不存在', 404, corsHeaders);
       }
 
-      return createSuccessResponse({ id: endpointId, message: 'LLM端点更新成功' }, corsHeaders);
+      // 后续模型：创建新端点
+      const createdEndpoints = [];
+      if (modelList.length > 1) {
+        const addedAt = Math.floor(Date.now() / 1000);
+
+        const maxOrderResult = await env.DB.prepare(
+          'SELECT MAX(sort_order) as max_order FROM monitored_llm_endpoints'
+        ).first();
+        let nextSortOrder = (maxOrderResult?.max_order && typeof maxOrderResult.max_order === 'number')
+          ? maxOrderResult.max_order + 1 : 0;
+
+        const insertStmts = [];
+        for (let i = 1; i < modelList.length; i++) {
+          const newId = Math.random().toString(36).substring(2, 12);
+          insertStmts.push(
+            env.DB.prepare(`
+              INSERT INTO monitored_llm_endpoints (id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).bind(newId, apiUrl, apiKey, modelList[i], checkPrompt, expectedContains, timeoutMs, addedAt, 'PENDING', nextSortOrder)
+          );
+          createdEndpoints.push({
+            id: newId, api_url: apiUrl, api_key: apiKey,
+            model: modelList[i], check_prompt: checkPrompt,
+            expected_contains: expectedContains,
+            timeout_ms: timeoutMs,
+            added_at: addedAt, last_status: 'PENDING', sort_order: nextSortOrder
+          });
+          nextSortOrder++;
+        }
+
+        await env.DB.batch(insertStmts);
+
+        // 为新创建的端点触发健康检查
+        for (const ep of createdEndpoints) {
+          if (ctx?.waitUntil) {
+            ctx.waitUntil(checkLlmEndpointStatus(ep, env.DB, ctx));
+          } else {
+            checkLlmEndpointStatus(ep, env.DB, ctx).catch(() => {});
+          }
+        }
+      }
+
+      return createSuccessResponse({
+        updated: endpointId,
+        created: createdEndpoints.map(ep => ep.id),
+        count: createdEndpoints.length,
+        message: modelList.length > 1
+          ? `更新成功，并新增 ${createdEndpoints.length} 个模型`
+          : 'LLM端点更新成功'
+      }, corsHeaders);
     } catch (error) {
       return handleDbError(error, corsHeaders, '更新LLM端点');
     }
@@ -5407,7 +5641,8 @@ function getAdminHtml() {
                         <input type="hidden" id="llmEndpointId">
                         <div class="mb-3">
                             <label for="llmEndpointModel" class="form-label">模型名称 *</label>
-                            <input type="text" class="form-control" id="llmEndpointModel" placeholder="例如：gpt-4o-mini, deepseek-chat, claude-sonnet-4-5-20250929" required>
+                            <textarea class="form-control" id="llmEndpointModel" rows="3" placeholder="支持多个模型：每行一个、逗号分隔或 JSON 数组均可&#10;例如：gpt-4o-mini, deepseek-chat, claude-sonnet-4-5-20250929" required></textarea>
+                            <div class="form-text">支持多个模型：每行一个、逗号分隔或 JSON 数组如 <code>["model-a","model-b"]</code>。同一个 API URL/Key/Prompt/Timeout 会应用到所有模型。</div>
                         </div>
                         <div class="mb-3">
                             <label for="llmEndpointUrl" class="form-label">API URL *</label>
@@ -10307,12 +10542,39 @@ function showLlmEndpointModal(endpointIdToEdit = null) {
     modal.show();
 }
 
+// 复用模型解析函数：支持 JSON 数组、换行分隔、逗号分隔，去重
+function parseLlmModelInput(input) {
+    if (!input || !input.trim()) return [];
+    const trimmed = input.trim();
+
+    // 尝试 JSON 数组解析
+    if (trimmed.startsWith('[')) {
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (!Array.isArray(parsed)) return [];
+            const models = parsed.map(item => {
+                if (typeof item === 'string') return item.trim();
+                if (item && typeof item === 'object' && item.model) return item.model.trim();
+                return '';
+            }).filter(Boolean);
+            return [...new Set(models)];
+        } catch (e) {
+            // JSON 解析失败，降级到文本解析
+        }
+    }
+
+    // 非 JSON：按换行或逗号分隔
+    const parts = trimmed.split(/[\\n,]+/);
+    const models = parts.map(p => p.trim()).filter(Boolean);
+    return [...new Set(models)];
+}
+
 // 保存LLM端点（添加或更新）
 async function saveLlmEndpoint() {
     const endpointId = document.getElementById('llmEndpointId').value;
     const api_url = document.getElementById('llmEndpointUrl').value.trim();
     const api_key = document.getElementById('llmEndpointApiKey').value.trim();
-    const model = document.getElementById('llmEndpointModel').value.trim();
+    const modelInput = document.getElementById('llmEndpointModel').value;
     const check_prompt = document.getElementById('llmEndpointPrompt').value.trim();
     const expected_contains = document.getElementById('llmEndpointExpected').value.trim();
     const timeout_ms = parseInt(document.getElementById('llmEndpointTimeout').value, 10) || 30000;
@@ -10325,12 +10587,19 @@ async function saveLlmEndpoint() {
         showToast('warning', 'URL必须以 http:// 或 https:// 开头');
         return;
     }
-    if (!model) {
-        showToast('warning', '请输入模型名称');
+
+    const models = parseLlmModelInput(modelInput);
+    if (models.length === 0) {
+        showToast('warning', '请输入至少一个模型名称');
         return;
     }
 
-    const requestBody = { api_url, api_key, model, check_prompt, expected_contains, timeout_ms };
+    const requestBody = {
+        api_url, api_key,
+        model: models[0],
+        models,
+        check_prompt, expected_contains, timeout_ms
+    };
     let apiUrl = '/api/admin/llm-endpoints';
     let method = 'POST';
 
@@ -10340,13 +10609,26 @@ async function saveLlmEndpoint() {
     }
 
     try {
-        await apiRequest(apiUrl, { method, body: JSON.stringify(requestBody) });
+        const result = await apiRequest(apiUrl, { method, body: JSON.stringify(requestBody) });
 
         const modalInstance = bootstrap.Modal.getInstance(document.getElementById('llmEndpointModal'));
         if (modalInstance) modalInstance.hide();
 
         await loadLlmEndpointList();
-        showToast('success', 'LLM端点' + (endpointId ? '更新' : '添加') + '成功');
+
+        if (endpointId) {
+            // 编辑模式
+            const createdCount = result?.count || 0;
+            if (createdCount > 0) {
+                showToast('success', \`更新成功，并新增 \${createdCount} 个模型\`);
+            } else {
+                showToast('success', 'LLM端点更新成功');
+            }
+        } else {
+            // 新增模式
+            const totalCount = result?.count || models.length;
+            showToast('success', \`添加 \${totalCount} 个LLM端点成功\`);
+        }
     } catch (error) {
         showToast('danger', '保存LLM端点失败: ' + error.message);
     }
@@ -10376,6 +10658,8 @@ async function deleteLlmEndpoint(endpointId) {
         showToast('danger', '删除LLM端点失败: ' + error.message);
     }
 }
+
+
 
 
 // ==================== LLM检查频率设置 ====================
