@@ -245,8 +245,27 @@ let dbInitialized = false;
 // SQL安全验证 - 防止注入攻击
 function validateSqlIdentifier(value, type) {
   const whitelist = {
-    column: ['id', 'name', 'url', 'description', 'sort_order', 'is_public', 'last_checked', 'last_status', 'timestamp', 'cpu', 'memory', 'disk', 'network', 'uptime'],
-    table: ['servers', 'monitored_sites', 'metrics', 'site_status_history'],
+    column: [
+      // common
+      'id', 'name', 'url', 'description', 'sort_order', 'is_public', 'timestamp',
+      // servers
+      'api_key', 'created_at', 'last_notified_down_at',
+      // metrics
+      'server_id', 'cpu', 'memory', 'disk', 'network', 'uptime',
+      // monitored_sites
+      'added_at', 'last_checked', 'last_status', 'last_status_code', 'last_response_time_ms',
+      // site_status_history / llm_status_history
+      'site_id', 'endpoint_id', 'status', 'status_code', 'response_time_ms', 'output_preview',
+      // monitored_llm_endpoints
+      'api_url', 'model', 'check_prompt', 'expected_contains', 'timeout_ms', 'last_output_preview',
+      // admin_credentials
+      'password_hash', 'last_login', 'failed_attempts', 'locked_until', 'must_change_password', 'password_changed_at',
+      // telegram_config / ntfy_config
+      'bot_token', 'chat_id', 'enable_notifications', 'updated_at', 'topic', 'server_url',
+      // app_config
+      'key', 'value'
+    ],
+    table: ['servers', 'monitored_sites', 'metrics', 'site_status_history', 'monitored_llm_endpoints', 'llm_status_history', 'admin_credentials', 'telegram_config', 'ntfy_config', 'app_config'],
     order: ['ASC', 'DESC']
   };
 
@@ -912,7 +931,42 @@ const D1_SCHEMAS = {
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('vps_report_interval_seconds', '60');
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('custom_background_enabled', 'false');
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('custom_background_url', '');
-    INSERT OR IGNORE INTO app_config (key, value) VALUES ('page_opacity', '80');`
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('page_opacity', '80');
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_check_interval', '1');`,
+
+  monitored_llm_endpoints: `
+    CREATE TABLE IF NOT EXISTS monitored_llm_endpoints (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      api_url TEXT NOT NULL,
+      api_key TEXT,
+      model TEXT NOT NULL,
+      check_prompt TEXT DEFAULT 'Say hello in one word',
+      expected_contains TEXT,
+      timeout_ms INTEGER DEFAULT 30000,
+      added_at INTEGER NOT NULL,
+      last_checked INTEGER,
+      last_status TEXT DEFAULT 'PENDING',
+      last_status_code INTEGER,
+      last_response_time_ms INTEGER,
+      last_output_preview TEXT,
+      sort_order INTEGER,
+      last_notified_down_at INTEGER DEFAULT NULL,
+      is_public INTEGER DEFAULT 1
+    );`,
+
+  llm_status_history: `
+    CREATE TABLE IF NOT EXISTS llm_status_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      endpoint_id TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      status_code INTEGER,
+      response_time_ms INTEGER,
+      output_preview TEXT,
+      FOREIGN KEY(endpoint_id) REFERENCES monitored_llm_endpoints(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_llm_status_history_endpoint_id_timestamp ON llm_status_history (endpoint_id, timestamp DESC);`
 };
 
 // ==================== 数据库初始化 ====================
@@ -1814,13 +1868,7 @@ async function handleApiRequest(request, env, ctx) {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -1886,13 +1934,7 @@ async function handleApiRequest(request, env, ctx) {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -1987,17 +2029,9 @@ async function handleApiRequest(request, env, ctx) {
         }
       }
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createSuccessResponse({}, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2005,13 +2039,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path.match(/^\/api\/admin\/servers\/([^\/]+)\/visibility$/) && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2034,17 +2062,9 @@ async function handleApiRequest(request, env, ctx) {
         UPDATE servers SET is_public = ? WHERE id = ?
       `).bind(is_public ? 1 : 0, serverId).run();
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createSuccessResponse({}, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2056,13 +2076,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/sites' && method === 'GET') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2100,13 +2114,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/sites' && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2150,10 +2158,10 @@ async function handleApiRequest(request, env, ctx) {
       // 立即执行健康检查
       const newSiteForCheck = { id: siteId, url, name: name || '' };
       if (ctx?.waitUntil) {
-        ctx.waitUntil(checkWebsiteStatus(newSiteForCheck, env.DB, ctx));
+        ctx.waitUntil(checkWebsiteStatusOptimized(newSiteForCheck, env.DB, ctx));
 
       } else {
-        checkWebsiteStatus(newSiteForCheck, env.DB, ctx).catch(e => {
+        checkWebsiteStatusOptimized(newSiteForCheck, env.DB, ctx).catch(e => {
           // 静默处理站点检查错误
         });
       }
@@ -2187,13 +2195,7 @@ async function handleApiRequest(request, env, ctx) {
                   }
       }
 
-      return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2277,17 +2279,9 @@ async function handleApiRequest(request, env, ctx) {
         });
       }
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createSuccessResponse({}, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2295,13 +2289,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/sites/batch-reorder' && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2331,13 +2319,7 @@ async function handleApiRequest(request, env, ctx) {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2345,13 +2327,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/sites/auto-sort' && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2403,13 +2379,7 @@ async function handleApiRequest(request, env, ctx) {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2503,17 +2473,9 @@ async function handleApiRequest(request, env, ctx) {
         }
       }
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createSuccessResponse({}, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2521,13 +2483,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path.match(/^\/api\/admin\/sites\/([^\/]+)\/visibility$/) && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2550,20 +2506,216 @@ async function handleApiRequest(request, env, ctx) {
         UPDATE monitored_sites SET is_public = ? WHERE id = ?
       `).bind(is_public ? 1 : 0, siteId).run();
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createSuccessResponse({}, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
+
+  // ==================== LLM端点监控API ====================
+
+  // 获取所有LLM端点（管理员）
+  if (path === '/api/admin/llm-endpoints' && method === 'GET') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ error: 'Unauthorized', message: '需要管理员权限' }), {
+        status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+
+    try {
+      const { results } = await env.DB.prepare(`
+        SELECT id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms,
+               added_at, last_checked, last_status, last_status_code, last_response_time_ms,
+               last_output_preview, sort_order, last_notified_down_at, is_public
+        FROM monitored_llm_endpoints
+        ORDER BY sort_order ASC NULLS LAST, model ASC
+      `).all();
+
+      return new Response(JSON.stringify({ endpoints: results || [] }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      if (error.message.includes('no such table')) {
+        try {
+          await env.DB.exec(D1_SCHEMAS.monitored_llm_endpoints);
+          await env.DB.exec(D1_SCHEMAS.llm_status_history);
+          return new Response(JSON.stringify({ endpoints: [] }), {
+            headers: { 'Content-Type': 'application/json', ...corsHeaders }
+          });
+        } catch (createError) {}
+      }
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // 添加LLM端点（管理员）
+  if (path === '/api/admin/llm-endpoints' && method === 'POST') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ error: 'Unauthorized', message: '需要管理员权限' }), {
+        status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+
+    try {
+      const { api_url, api_key, model, check_prompt, expected_contains, timeout_ms } = await parseJsonSafely(request);
+
+      if (!api_url || !isValidHttpUrl(api_url)) {
+        return new Response(JSON.stringify({ error: 'Valid API URL is required', message: '请输入有效的API URL' }), {
+          status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      if (!model || !model.trim()) {
+        return new Response(JSON.stringify({ error: 'Model is required', message: '请输入模型名称' }), {
+          status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      const endpointId = Math.random().toString(36).substring(2, 12);
+      const addedAt = Math.floor(Date.now() / 1000);
+
+      const maxOrderResult = await env.DB.prepare(
+        'SELECT MAX(sort_order) as max_order FROM monitored_llm_endpoints'
+      ).first();
+      const nextSortOrder = (maxOrderResult?.max_order && typeof maxOrderResult.max_order === 'number')
+        ? maxOrderResult.max_order + 1 : 0;
+
+      await env.DB.prepare(`
+        INSERT INTO monitored_llm_endpoints (id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        endpointId, api_url, api_key || '', model.trim(),
+        check_prompt || 'Say hello in one word', expected_contains || '',
+        timeout_ms || 30000, addedAt, 'PENDING', nextSortOrder
+      ).run();
+
+      const endpointData = { id: endpointId, api_url, model: model.trim(), added_at: addedAt, last_status: 'PENDING', sort_order: nextSortOrder };
+
+      // 立即执行健康检查
+      const newEndpoint = { id: endpointId, api_url, api_key, model: model.trim(), check_prompt, expected_contains, timeout_ms };
+      if (ctx?.waitUntil) {
+        ctx.waitUntil(checkLlmEndpointStatus(newEndpoint, env.DB, ctx));
+      } else {
+        checkLlmEndpointStatus(newEndpoint, env.DB, ctx).catch(() => {});
+      }
+
+      return new Response(JSON.stringify({ endpoint: endpointData }), {
+        status: 201, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      if (error.message.includes('UNIQUE constraint failed')) {
+        return new Response(JSON.stringify({ error: 'Duplicate entry', message: '该端点已存在' }), {
+          status: 409, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+      if (error.message.includes('no such table')) {
+        try {
+          await env.DB.exec(D1_SCHEMAS.monitored_llm_endpoints);
+          await env.DB.exec(D1_SCHEMAS.llm_status_history);
+          return new Response(JSON.stringify({ error: 'Database table created, please retry', message: '数据库表已创建，请重试' }), {
+            status: 503, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+          });
+        } catch (createError) {}
+      }
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // 更新LLM端点（管理员）
+  if (path.match(/\/api\/admin\/llm-endpoints\/[^\/]+$/) && method === 'PUT') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const endpointId = path.split('/').pop();
+      if (!endpointId) {
+        return createErrorResponse('Invalid endpoint ID', '无效的端点ID', 400, corsHeaders);
+      }
+
+      const { api_url, api_key, model, check_prompt, expected_contains, timeout_ms } = await request.json();
+      if (!api_url || !api_url.trim()) {
+        return createErrorResponse('Invalid API URL', 'API URL不能为空', 400, corsHeaders);
+      }
+      if (!model || !model.trim()) {
+        return createErrorResponse('Invalid model', '模型名称不能为空', 400, corsHeaders);
+      }
+
+      const info = await env.DB.prepare(`
+        UPDATE monitored_llm_endpoints SET api_url = ?, api_key = ?, model = ?, check_prompt = ?, expected_contains = ?, timeout_ms = ? WHERE id = ?
+      `).bind(
+        api_url.trim(), api_key || '', model.trim(),
+        check_prompt || 'Say hello in one word', expected_contains || '',
+        timeout_ms || 30000, endpointId
+      ).run();
+
+      if (info.changes === 0) {
+        return createErrorResponse('Endpoint not found', '端点不存在', 404, corsHeaders);
+      }
+
+      return createSuccessResponse({ id: endpointId, message: 'LLM端点更新成功' }, corsHeaders);
+    } catch (error) {
+      return handleDbError(error, corsHeaders, '更新LLM端点');
+    }
+  }
+
+  // 删除LLM端点（管理员）
+  if (path.match(/\/api\/admin\/llm-endpoints\/[^\/]+$/) && method === 'DELETE') {
+    const user = await authenticateAdmin(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const endpointId = extractAndValidateServerId(path);
+      if (!endpointId) {
+        return createErrorResponse('Invalid endpoint ID', '无效的端点ID格式', 400, corsHeaders);
+      }
+
+      const url = new URL(request.url);
+      const confirmed = url.searchParams.get('confirm') === 'true';
+      if (!confirmed) {
+        return createErrorResponse('Confirmation required', '删除操作需要确认，请添加 ?confirm=true 参数', 400, corsHeaders);
+      }
+
+      const info = await env.DB.prepare('DELETE FROM monitored_llm_endpoints WHERE id = ?').bind(endpointId).run();
+
+      if (info.changes === 0) {
+        return new Response(JSON.stringify({ error: 'Endpoint not found' }), {
+          status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      return createSuccessResponse({}, corsHeaders);
+    } catch (error) {
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // LLM端点可见性切换（管理员）
+  if (path.match(/\/api\/admin\/llm-endpoints\/[^\/]+\/visibility$/) && method === 'PUT') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const pathParts = path.split('/');
+      const endpointId = pathParts[pathParts.length - 2];
+      const { is_public } = await request.json();
+
+      await env.DB.prepare('UPDATE monitored_llm_endpoints SET is_public = ? WHERE id = ?')
+        .bind(is_public ? 1 : 0, endpointId).run();
+
+      return createSuccessResponse({ id: endpointId, is_public, message: '可见性更新成功' }, corsHeaders);
+    } catch (error) {
+      return handleDbError(error, corsHeaders, '更新LLM端点可见性');
+    }
+  }
 
   // ==================== 公共API ====================
 
@@ -2618,13 +2770,61 @@ async function handleApiRequest(request, env, ctx) {
         } catch (createError) {
                   }
       }
-      return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // 获取所有LLM端点状态（公开，支持管理员和游客模式）
+  if (path === '/api/llm-endpoints/status' && method === 'GET') {
+    try {
+      const user = await authenticateRequestOptional(request, env);
+      const isAdmin = user !== null;
+
+      let query = `
+        SELECT id, api_url, model, last_checked, last_status, last_status_code,
+               last_response_time_ms, last_output_preview
+        FROM monitored_llm_endpoints
+      `;
+      if (!isAdmin) {
+        query += ` WHERE is_public = 1`;
+      }
+      query += ` ORDER BY sort_order ASC NULLS LAST, model ASC`;
+
+      const { results } = await env.DB.prepare(query).all();
+      const endpoints = results || [];
+
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const twentyFourHoursAgoSeconds = nowSeconds - (24 * 60 * 60);
+
+      for (const ep of endpoints) {
+        try {
+          const { results: historyResults } = await env.DB.prepare(`
+            SELECT timestamp, status, status_code, response_time_ms, output_preview
+            FROM llm_status_history
+            WHERE endpoint_id = ? AND timestamp >= ?
+            ORDER BY timestamp DESC
+          `).bind(ep.id, twentyFourHoursAgoSeconds).all();
+
+          ep.history = historyResults || [];
+        } catch (historyError) {
+          ep.history = [];
+        }
+      }
+
+      return new Response(JSON.stringify({ endpoints }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
+    } catch (error) {
+      if (error.message.includes('no such table')) {
+        try {
+          await env.DB.exec(D1_SCHEMAS.monitored_llm_endpoints);
+          await env.DB.exec(D1_SCHEMAS.llm_status_history);
+          return new Response(JSON.stringify({ endpoints: [] }), {
+            headers: { 'Content-Type': 'application/json', ...corsHeaders }
+          });
+        } catch (createError) {}
+      }
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2651,13 +2851,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/settings/vps-report-interval' && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2684,13 +2878,56 @@ async function handleApiRequest(request, env, ctx) {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // 获取LLM检查频率（公开）
+  if (path === '/api/admin/settings/llm-check-interval' && method === 'GET') {
+    try {
+      const row = await env.DB.prepare(
+        "SELECT value FROM app_config WHERE key = 'llm_check_interval'"
+      ).first();
+      const interval = row?.value ? parseInt(row.value, 10) : 1;
+
+      return new Response(JSON.stringify({ interval }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
+    } catch (error) {
+      return new Response(JSON.stringify({ interval: 1 }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+  // 设置LLM检查频率（管理员）
+  if (path === '/api/admin/settings/llm-check-interval' && method === 'POST') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const { interval } = await request.json();
+      if (typeof interval !== 'number' || interval < 1 || !Number.isInteger(interval)) {
+        return new Response(JSON.stringify({
+          error: 'Invalid interval value. Must be a positive integer >= 1.'
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      await env.DB.prepare('REPLACE INTO app_config (key, value) VALUES (?, ?)').bind(
+        'llm_check_interval',
+        interval.toString()
+      ).run();
+
+      return new Response(JSON.stringify({ success: true, interval }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2701,13 +2938,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/telegram-settings' && method === 'GET') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2732,13 +2963,7 @@ async function handleApiRequest(request, env, ctx) {
         } catch (createError) {
                   }
       }
-      return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2746,13 +2971,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/telegram-settings' && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2779,17 +2998,9 @@ async function handleApiRequest(request, env, ctx) {
         }
       }
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createSuccessResponse({}, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2799,13 +3010,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/ntfy-settings' && method === 'GET') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2830,13 +3035,7 @@ async function handleApiRequest(request, env, ctx) {
         } catch (createError) {
                   }
       }
-      return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2844,13 +3043,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/ntfy-settings' && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2878,17 +3071,9 @@ async function handleApiRequest(request, env, ctx) {
         }
       }
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createSuccessResponse({}, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -2944,13 +3129,7 @@ async function handleApiRequest(request, env, ctx) {
   if (path === '/api/admin/background-settings' && method === 'POST') {
     const user = await authenticateRequest(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -3015,13 +3194,7 @@ async function handleApiRequest(request, env, ctx) {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+            return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -3055,13 +3228,7 @@ async function handleApiRequest(request, env, ctx) {
         } catch (createError) {
                   }
       }
-      return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
   }
 
@@ -3074,105 +3241,7 @@ async function handleApiRequest(request, env, ctx) {
 }
 
 
-// --- Scheduled Task for Website Monitoring ---
-
-// ==================== Telegram通知（已移至优化版本） ====================
-
-// 旧的单服务器状态检查函数已移除，改为前端状态变化检测
-
-// 旧的VPS离线检查函数已移除，改为前端状态变化检测 + 定时提醒
-
-
-async function checkWebsiteStatus(site, db, ctx) { // Added ctx for waitUntil
-  const { id, url, name } = site; // Added name
-  const startTime = Date.now();
-  let newStatus = 'PENDING'; // Renamed to newStatus to avoid conflict
-  let newStatusCode = null; // Renamed
-  let newResponseTime = null; // Renamed
-
-  // Get current status and last notification time from DB
-  let previousStatus = 'PENDING';
-  let siteLastNotifiedDownAt = null;
-
-  try {
-    const siteDetailsStmt = db.prepare('SELECT last_status, last_notified_down_at FROM monitored_sites WHERE id = ?'); // Removed enable_frequent_down_notifications
-    const siteDetailsResult = await siteDetailsStmt.bind(id).first();
-    if (siteDetailsResult) {
-      previousStatus = siteDetailsResult.last_status || 'PENDING';
-      siteLastNotifiedDownAt = siteDetailsResult.last_notified_down_at;
-    }
-  } catch (error) {
-        // 静默处理错误
-    }
-  const NOTIFICATION_INTERVAL_SECONDS = 1 * 60 * 60; // 1 hour
-
-
-  try {
-    const response = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(15000) });
-    newResponseTime = Date.now() - startTime;
-    newStatusCode = response.status;
-
-    if (response.ok || (response.status >= 300 && response.status < 500)) { // 2xx, 3xx, and 4xx are considered UP
-      newStatus = 'UP';
-    } else {
-      newStatus = 'DOWN';
-    }
-  } catch (error) {
-    newResponseTime = Date.now() - startTime;
-    if (error.name === 'TimeoutError') {
-      newStatus = 'TIMEOUT';
-    } else {
-      newStatus = 'ERROR';
-    }
-  }
-
-  const checkTime = Math.floor(Date.now() / 1000);
-  const siteDisplayName = name || url;
-  let newSiteLastNotifiedDownAt = siteLastNotifiedDownAt; // Preserve by default
-
-  if (['DOWN', 'TIMEOUT', 'ERROR'].includes(newStatus)) {
-    const isFirstTimeDown = !['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus);
-    if (isFirstTimeDown) {
-      // Site just went down
-      const message = `🔴 网站故障: *${siteDisplayName}* 当前状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n网址: ${url}`;
-      ctx.waitUntil(sendNotifications(db, message));
-      newSiteLastNotifiedDownAt = checkTime;
-
-    } else {
-      // Site is still down, check if 1-hour interval has passed for resend
-      const shouldResend = siteLastNotifiedDownAt === null || (checkTime - siteLastNotifiedDownAt > NOTIFICATION_INTERVAL_SECONDS);
-      if (shouldResend) {
-        const message = `🔴 网站持续故障: *${siteDisplayName}* 状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n网址: ${url}`;
-        ctx.waitUntil(sendNotifications(db, message));
-        newSiteLastNotifiedDownAt = checkTime;
-      }
-    }
-  } else if (newStatus === 'UP' && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
-    // Site just came back up
-    const message = `✅ 网站恢复: *${siteDisplayName}* 已恢复在线!\n网址: ${url}`;
-    ctx.waitUntil(sendNotifications(db, message));
-    newSiteLastNotifiedDownAt = null; // Clear notification timestamp as site is up
-  }
-
-  // Update D1
-  try {
-    const updateSiteStmt = db.prepare(
-      'UPDATE monitored_sites SET last_checked = ?, last_status = ?, last_status_code = ?, last_response_time_ms = ?, last_notified_down_at = ? WHERE id = ?'
-    );
-    const recordHistoryStmt = db.prepare(
-      'INSERT INTO site_status_history (site_id, timestamp, status, status_code, response_time_ms) VALUES (?, ?, ?, ?, ?)'
-    );
-
-    await db.batch([
-      updateSiteStmt.bind(checkTime, newStatus, newStatusCode, newResponseTime, newSiteLastNotifiedDownAt, id),
-      recordHistoryStmt.bind(id, checkTime, newStatus, newStatusCode, newResponseTime)
-    ]);
-  } catch (dbError) {
-    // 静默处理数据库更新错误
-  }
-}
-
-// ==================== 优化版本函数 ====================
+// ==================== 网站状态检查（优化版） ====================
 
 // 优化版网站状态检查 - 减少超时时间，使用缓存
 async function checkWebsiteStatusOptimized(site, db, ctx) {
@@ -3258,6 +3327,148 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
         .bind(checkTime, newStatus, newStatusCode, newResponseTime, newSiteLastNotifiedDownAt, id),
       db.prepare('INSERT INTO site_status_history (site_id, timestamp, status, status_code, response_time_ms) VALUES (?, ?, ?, ?, ?)')
         .bind(id, checkTime, newStatus, newStatusCode, newResponseTime)
+    ]);
+  } catch (dbError) {
+    // 静默处理数据库更新错误
+  }
+}
+
+// ==================== LLM端点健康检查 ====================
+
+async function checkLlmEndpointStatus(endpoint, db, ctx) {
+  const { id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms } = endpoint;
+  const startTime = Date.now();
+  let newStatus = 'PENDING';
+  let newStatusCode = null;
+  let newResponseTime = null;
+  let outputPreview = null;
+
+  const name = model;
+
+  // 获取当前状态
+  let previousStatus = 'PENDING';
+  let lastNotifiedDownAt = null;
+
+  try {
+    const details = await db.prepare(
+      'SELECT last_status, last_notified_down_at FROM monitored_llm_endpoints WHERE id = ?'
+    ).bind(id).first();
+
+    if (details) {
+      previousStatus = details.last_status || 'PENDING';
+      lastNotifiedDownAt = details.last_notified_down_at;
+    }
+  } catch (error) {
+    // 静默处理
+  }
+
+  const NOTIFICATION_INTERVAL_SECONDS = 1 * 60 * 60; // 1小时
+  const effectiveTimeout = timeout_ms || 30000;
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (api_key) {
+      headers['Authorization'] = `Bearer ${api_key}`;
+    }
+
+    const prompt = check_prompt || 'Say hello in one word';
+    const body = JSON.stringify({
+      model: model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 50,
+      stream: false
+    });
+
+    const response = await fetch(api_url, {
+      method: 'POST',
+      headers: headers,
+      body: body,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(effectiveTimeout)
+    });
+
+    newResponseTime = Date.now() - startTime;
+    newStatusCode = response.status;
+
+    if (response.ok) {
+      try {
+        const data = await response.json();
+        // 兼容 OpenAI 格式和其他兼容格式
+        const content = data?.choices?.[0]?.message?.content
+          || data?.content?.[0]?.text
+          || data?.output_text
+          || null;
+
+        if (content) {
+          outputPreview = content.substring(0, 200);
+
+          // 检查期望内容
+          if (expected_contains) {
+            const patterns = expected_contains.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
+            const contentLower = content.toLowerCase();
+            const matched = patterns.some(p => contentLower.includes(p));
+            newStatus = matched ? 'UP' : 'DOWN';
+          } else {
+            newStatus = 'UP';
+          }
+        } else {
+          // API 返回 200 但无有效内容
+          outputPreview = JSON.stringify(data).substring(0, 200);
+          newStatus = 'DOWN';
+        }
+      } catch (parseError) {
+        outputPreview = 'Response parse error';
+        newStatus = 'DOWN';
+      }
+    } else {
+      newStatus = 'DOWN';
+      try {
+        const errBody = await response.text();
+        outputPreview = errBody.substring(0, 200);
+      } catch {}
+    }
+  } catch (error) {
+    newResponseTime = Date.now() - startTime;
+    if (error.name === 'TimeoutError' || error.name === 'AbortError') {
+      newStatus = 'TIMEOUT';
+      outputPreview = 'Request timed out';
+    } else {
+      newStatus = 'ERROR';
+      outputPreview = error.message?.substring(0, 200) || 'Connection error';
+    }
+  }
+
+  const checkTime = Math.floor(Date.now() / 1000);
+  let newLastNotifiedDownAt = lastNotifiedDownAt;
+
+  // 通知逻辑
+  if (['DOWN', 'TIMEOUT', 'ERROR'].includes(newStatus)) {
+    const isFirstTimeDown = !['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus);
+    if (isFirstTimeDown) {
+      const message = `🔴 LLM端点故障: *${name}* 当前状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
+      ctx.waitUntil(sendNotifications(db, message));
+      newLastNotifiedDownAt = checkTime;
+    } else {
+      const shouldResend = lastNotifiedDownAt === null || (checkTime - lastNotifiedDownAt > NOTIFICATION_INTERVAL_SECONDS);
+      if (shouldResend) {
+        const message = `🔴 LLM端点持续故障: *${name}* 状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
+        ctx.waitUntil(sendNotifications(db, message));
+        newLastNotifiedDownAt = checkTime;
+      }
+    }
+  } else if (newStatus === 'UP' && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
+    const message = `✅ LLM端点恢复: *${name}* 已恢复在线!\n模型: ${model}\nURL: ${api_url}`;
+    ctx.waitUntil(sendNotifications(db, message));
+    newLastNotifiedDownAt = null;
+  }
+
+  // 更新数据库
+  try {
+    await db.batch([
+      db.prepare('UPDATE monitored_llm_endpoints SET last_checked = ?, last_status = ?, last_status_code = ?, last_response_time_ms = ?, last_output_preview = ?, last_notified_down_at = ? WHERE id = ?')
+        .bind(checkTime, newStatus, newStatusCode, newResponseTime, outputPreview, newLastNotifiedDownAt, id),
+      db.prepare('INSERT INTO llm_status_history (endpoint_id, timestamp, status, status_code, response_time_ms, output_preview) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(id, checkTime, newStatus, newStatusCode, newResponseTime, outputPreview)
     ]);
   } catch (dbError) {
     // 静默处理数据库更新错误
@@ -3381,9 +3592,18 @@ async function performDatabaseMaintenance(db) {
 
   try {
     // 清理30天前的网站状态历史
-    const result = await db.prepare(
+    await db.prepare(
       'DELETE FROM site_status_history WHERE timestamp < ?'
     ).bind(thirtyDaysAgo).run();
+
+    // 清理30天前的LLM状态历史
+    try {
+      await db.prepare(
+        'DELETE FROM llm_status_history WHERE timestamp < ?'
+      ).bind(thirtyDaysAgo).run();
+    } catch (e) {
+      // 表可能不存在，静默处理
+    }
 
     // 清理JWT缓存
     cleanupJWTCache();
@@ -3460,6 +3680,48 @@ export default {
             if (sitePromises.length > 0) {
               await Promise.all(sitePromises);
             }
+          }
+
+          // ==================== LLM端点监控部分 ====================
+          // 支持独立频率控制：通过 app_config 的 llm_check_interval 设置
+          // 值为1=每次cron都检查，2=隔一次检查，3=每三次检查一次，以此类推
+          try {
+            let llmCheckInterval = 1;
+            try {
+              const intervalRow = await env.DB.prepare(
+                "SELECT value FROM app_config WHERE key = 'llm_check_interval'"
+              ).first();
+              if (intervalRow?.value) {
+                llmCheckInterval = Math.max(1, parseInt(intervalRow.value, 10) || 1);
+              }
+            } catch (configErr) {
+              // 配置读取失败，使用默认值1
+            }
+
+            if (taskCounter % llmCheckInterval === 0) {
+              const { results: llmEndpoints } = await env.DB.prepare(
+                'SELECT id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms FROM monitored_llm_endpoints'
+              ).all();
+
+              if (llmEndpoints?.length > 0) {
+                const llmConcurrencyLimit = 3;
+                const llmPromises = [];
+
+                for (const endpoint of llmEndpoints) {
+                  llmPromises.push(checkLlmEndpointStatus(endpoint, env.DB, ctx));
+                  if (llmPromises.length >= llmConcurrencyLimit) {
+                    await Promise.all(llmPromises);
+                    llmPromises.length = 0;
+                  }
+                }
+
+                if (llmPromises.length > 0) {
+                  await Promise.all(llmPromises);
+                }
+              }
+            }
+          } catch (llmError) {
+            // 静默处理LLM监控错误（表可能不存在）
           }
 
           // ==================== VPS离线提醒检查 ====================
@@ -4236,6 +4498,56 @@ function getIndexHtml() {
     </div>
     <!-- End Website Status Section -->
 
+    <!-- LLM Endpoint Status Section -->
+    <div class="container mt-4 mb-4">
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <div>
+                    <h5 class="card-title mb-3">
+                        <i class="bi bi-robot me-2"></i>LLM 端点可用性
+                    </h5>
+
+                    <div id="noLlmEndpoints" class="alert alert-info d-none">
+                        暂无监控 LLM 端点。
+                    </div>
+
+                    <!-- 桌面端表格视图 -->
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover align-middle">
+                            <thead>
+                                <tr>
+                                    <th>模型</th>
+                                    <th>状态</th>
+                                    <th>状态码</th>
+                                    <th>响应时间 (ms)</th>
+                                    <th>最后检查</th>
+                                    <th>输出预览</th>
+                                    <th>24h记录</th>
+                                </tr>
+                            </thead>
+                            <tbody id="llmStatusTableBody">
+                                <tr>
+                                    <td colspan="7" class="text-center">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- 移动端卡片视图 -->
+                    <div class="mobile-card-container" id="mobileLlmContainer">
+                        <div class="text-center p-3">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">加载中...</span>
+                            </div>
+                            <div class="mt-2">加载LLM端点数据中...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- End LLM Endpoint Status Section -->
+
     <!-- Server Detailed row template (hidden by default) -->
     <template id="serverDetailsTemplate">
         <tr class="server-details-row d-none">
@@ -4791,6 +5103,71 @@ function getAdminHtml() {
                 <!-- 分隔线 -->
                 <hr class="my-4">
 
+                <!-- LLM端点监控管理部分 -->
+                <div>
+                    <div class="admin-header-row mb-3">
+                        <div class="admin-header-title">
+                            <h5 class="card-title mb-0">
+                                <i class="bi bi-robot me-2"></i>LLM 端点监控管理
+                            </h5>
+                        </div>
+                        <div class="admin-header-content">
+                            <!-- LLM检查频率设置 -->
+                            <form id="llmCheckIntervalForm" class="admin-settings-form me-2">
+                                <div class="settings-group">
+                                    <label for="llmCheckInterval" class="form-label">探测频率倍数:</label>
+                                    <div class="input-group">
+                                        <input type="number" class="form-control form-control-sm" id="llmCheckInterval" placeholder="1" min="1" style="width: 80px;">
+                                        <button type="button" id="saveLlmCheckIntervalBtn" class="btn btn-info btn-sm">保存</button>
+                                    </div>
+                                    <small class="text-muted">1=每次Cron都检查，2=隔一次，3=每三次...</small>
+                                </div>
+                            </form>
+                            <div class="admin-actions-group desktop-only">
+                                <button id="addLlmEndpointBtn" class="btn btn-success">
+                                    <i class="bi bi-plus-circle"></i> 添加LLM端点
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 桌面端表格视图 -->
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover">
+                            <thead>
+                                <tr>
+                                    <th>模型</th>
+                                    <th>API URL</th>
+                                    <th>状态</th>
+                                    <th>状态码</th>
+                                    <th>响应时间 (ms)</th>
+                                    <th>最后检查</th>
+                                    <th>显示</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="llmEndpointTableBody">
+                                <tr>
+                                    <td colspan="8" class="text-center">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- 移动端卡片视图 -->
+                    <div class="mobile-card-container" id="mobileAdminLlmContainer">
+                        <div class="text-center p-3">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">加载中...</span>
+                            </div>
+                            <div class="mt-2">加载LLM端点数据中...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 分隔线 -->
+                <hr class="my-4">
+
                 <!-- Telegram 通知设置部分 -->
                 <div>
                     <h5 class="card-title mb-3">
@@ -5012,6 +5389,73 @@ function getAdminHtml() {
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                     <button type="button" class="btn btn-danger" id="confirmDeleteSiteBtn">删除</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- LLM端点监控模态框 -->
+    <div class="modal fade" id="llmEndpointModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="llmEndpointModalTitle">添加LLM端点</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="llmEndpointForm">
+                        <input type="hidden" id="llmEndpointId">
+                        <div class="mb-3">
+                            <label for="llmEndpointModel" class="form-label">模型名称 *</label>
+                            <input type="text" class="form-control" id="llmEndpointModel" placeholder="例如：gpt-4o-mini, deepseek-chat, claude-sonnet-4-5-20250929" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="llmEndpointUrl" class="form-label">API URL *</label>
+                            <input type="url" class="form-control" id="llmEndpointUrl" placeholder="https://api.openai.com/v1/chat/completions" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="llmEndpointApiKey" class="form-label">API Key（可选）</label>
+                            <input type="password" class="form-control" id="llmEndpointApiKey" placeholder="sk-...">
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label for="llmEndpointPrompt" class="form-label">测试 Prompt</label>
+                                <input type="text" class="form-control" id="llmEndpointPrompt" placeholder="默认: Say hello in one word">
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label for="llmEndpointExpected" class="form-label">期望包含（逗号分隔，可选）</label>
+                                <input type="text" class="form-control" id="llmEndpointExpected" placeholder="例如：hello,hi,你好">
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="llmEndpointTimeout" class="form-label">超时时间 (ms)</label>
+                            <input type="number" class="form-control" id="llmEndpointTimeout" value="30000" min="5000" max="120000">
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-primary" id="saveLlmEndpointBtn">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- LLM端点删除确认模态框 -->
+    <div class="modal fade" id="deleteLlmEndpointModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">确认删除LLM端点</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p>确定要停止监控 LLM 端点 "<span id="deleteLlmEndpointName"></span>" 吗？</p>
+                    <p class="text-danger">此操作不可逆。</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-danger" id="confirmDeleteLlmEndpointBtn">删除</button>
                 </div>
             </div>
         </div>
@@ -6824,6 +7268,18 @@ function initializeSiteDataUpdates() {
 
     }
 
+// LLM端点状态每小时刷新一次
+let llmUpdateInterval = null;
+function initializeLlmDataUpdates() {
+    const hourlyRefreshInterval = 60 * 60 * 1000;
+    if (llmUpdateInterval) {
+        clearInterval(llmUpdateInterval);
+    }
+    llmUpdateInterval = setInterval(() => {
+        loadAllLlmEndpointStatuses();
+    }, hourlyRefreshInterval);
+}
+
 // 移除手动刷新按钮相关代码，改为自动刷新
 
 // Execute after the page loads (only for main page)
@@ -6842,10 +7298,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Load initial data
     loadAllServerStatuses();
     loadAllSiteStatuses();
+    loadAllLlmEndpointStatuses();
 
     // Initialize periodic updates separately
         initializeVpsDataUpdates();
         initializeSiteDataUpdates();
+        initializeLlmDataUpdates();
 
     // Add click event listener to the table body for row expansion
     serverTableBody.addEventListener('click', handleRowClick);
@@ -7621,6 +8079,110 @@ function renderSiteHistoryBar(containerElement, history) {
 }
 
 
+// ==================== LLM端点状态渲染（公开页面） ====================
+
+async function loadAllLlmEndpointStatuses() {
+    try {
+        let data;
+        try {
+            data = await publicApiRequest('/api/llm-endpoints/status');
+        } catch (error) {
+            await publicApiRequest('/api/init-db');
+            data = await publicApiRequest('/api/llm-endpoints/status');
+        }
+        const endpoints = data.endpoints || [];
+
+        const noLlmAlert = document.getElementById('noLlmEndpoints');
+        const llmStatusTableBody = document.getElementById('llmStatusTableBody');
+
+        if (!llmStatusTableBody) return; // Not on main page
+
+        if (endpoints.length === 0) {
+            if (noLlmAlert) noLlmAlert.classList.remove('d-none');
+            llmStatusTableBody.innerHTML = '<tr><td colspan="7" class="text-center">暂无LLM端点监控数据。</td></tr>';
+            renderMobileLlmCards([]);
+            return;
+        } else {
+            if (noLlmAlert) noLlmAlert.classList.add('d-none');
+        }
+
+        renderLlmStatusTable(endpoints);
+    } catch (error) {
+        const llmStatusTableBody = document.getElementById('llmStatusTableBody');
+        if (llmStatusTableBody) {
+            llmStatusTableBody.innerHTML = '<tr><td colspan="7" class="text-center text-danger">加载LLM端点数据失败，请刷新页面重试。</td></tr>';
+        }
+    }
+}
+
+async function renderLlmStatusTable(endpoints) {
+    const tableBody = document.getElementById('llmStatusTableBody');
+    if (!tableBody) return;
+    tableBody.innerHTML = '';
+
+    for (const ep of endpoints) {
+        const row = document.createElement('tr');
+        const statusInfo = getSiteStatusBadge(ep.last_status);
+        const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
+        const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
+        const outputPreview = ep.last_output_preview
+            ? (ep.last_output_preview.length > 60 ? ep.last_output_preview.substring(0, 60) + '...' : ep.last_output_preview)
+            : '-';
+
+        const historyCell = document.createElement('td');
+        const historyContainer = document.createElement('div');
+        historyContainer.className = 'history-bar-container';
+        historyCell.appendChild(historyContainer);
+
+        const displayName = ep.model;
+        row.innerHTML = \`
+            <td><span class="badge bg-info">\${displayName}</span></td>
+            <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
+            <td>\${ep.last_status_code || '-'}</td>
+            <td>\${responseTime}</td>
+            <td>\${lastCheckTime}</td>
+            <td><small class="text-muted" title="\${ep.last_output_preview || ''}">\${outputPreview}</small></td>
+        \`;
+        row.appendChild(historyCell);
+        tableBody.appendChild(row);
+
+        renderSiteHistoryBar(historyContainer, ep.history || []);
+    }
+
+    renderMobileLlmCards(endpoints);
+}
+
+function renderMobileLlmCards(endpoints) {
+    const container = document.getElementById('mobileLlmContainer');
+    if (!container) return;
+
+    if (!endpoints || endpoints.length === 0) {
+        container.innerHTML = '<div class="text-center p-3 text-muted">暂无LLM端点监控数据。</div>';
+        return;
+    }
+
+    let cardsHtml = '';
+    for (const ep of endpoints) {
+        const statusInfo = getSiteStatusBadge(ep.last_status);
+        const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
+        const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
+        const displayName = ep.model;
+
+        cardsHtml += \`
+            <div class="card mb-2">
+                <div class="card-body p-2">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <strong>\${displayName}</strong>
+                        <span class="badge \${statusInfo.class}">\${statusInfo.text}</span>
+                    </div>
+                    <div class="mt-1"><small>响应: \${responseTime} | \${lastCheckTime}</small></div>
+                </div>
+            </div>
+        \`;
+    }
+    container.innerHTML = cardsHtml;
+}
+
 // Get website status badge class and text (copied from admin.js for reuse)
 function getSiteStatusBadge(status) {
     switch (status) {
@@ -8192,6 +8754,8 @@ let currentServerId = null;
 let currentSiteId = null; // For site deletion
 let serverList = [];
 let siteList = []; // For monitored sites
+let currentLlmEndpointId = null; // For LLM endpoint deletion
+let llmEndpointList = []; // For monitored LLM endpoints
 let hasAddedNewServer = false; // 标记是否添加了新服务器
 
 // 页面加载完成后执行
@@ -8215,6 +8779,8 @@ document.addEventListener('DOMContentLoaded', async function() {
     loadServerList();
     // 加载监控网站列表
     loadSiteList();
+    // 加载LLM端点监控列表
+    loadLlmEndpointList();
     // 加载Telegram设置
     loadTelegramSettings();
     // 加载ntfy设置
@@ -8384,6 +8950,28 @@ function initEventListeners() {
             deleteSite(currentSiteId);
         }
     });
+
+    // --- LLM Endpoint Monitoring Event Listeners ---
+    document.getElementById('addLlmEndpointBtn').addEventListener('click', function() {
+        showLlmEndpointModal();
+    });
+
+    document.getElementById('saveLlmEndpointBtn').addEventListener('click', function() {
+        saveLlmEndpoint();
+    });
+
+    document.getElementById('confirmDeleteLlmEndpointBtn').addEventListener('click', function() {
+        if (currentLlmEndpointId) {
+            deleteLlmEndpoint(currentLlmEndpointId);
+        }
+    });
+
+    document.getElementById('saveLlmCheckIntervalBtn').addEventListener('click', function() {
+        saveLlmCheckInterval();
+    });
+
+    // 加载LLM检查频率设置
+    loadLlmCheckInterval();
 
     // 保存Telegram设置按钮
     document.getElementById('saveTelegramSettingsBtn').addEventListener('click', function() {
@@ -9594,6 +10182,233 @@ async function deleteSite(siteId) {
 
     } catch (error) {
                 showToast('danger', '删除网站失败: ' + error.message);
+    }
+}
+
+
+// ==================== LLM端点管理函数 ====================
+
+// 加载LLM端点列表
+async function loadLlmEndpointList() {
+    try {
+        const data = await apiRequest('/api/admin/llm-endpoints');
+        llmEndpointList = data.endpoints || [];
+        renderLlmEndpointTable(llmEndpointList);
+    } catch (error) {
+        showToast('danger', '加载LLM端点列表失败: ' + error.message);
+    }
+}
+
+// 渲染LLM端点管理表格
+function renderLlmEndpointTable(endpoints) {
+    const tableBody = document.getElementById('llmEndpointTableBody');
+    if (!tableBody) return;
+
+    tableBody.innerHTML = '';
+
+    if (endpoints.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="8" class="text-center">暂无LLM端点</td></tr>';
+        return;
+    }
+
+    endpoints.forEach((ep) => {
+        const row = document.createElement('tr');
+        row.setAttribute('data-llm-id', ep.id);
+
+        const statusInfo = getSiteStatusBadge(ep.last_status);
+        const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
+        const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
+
+        row.innerHTML = \`
+            <td><span class="badge bg-info">\${ep.model}</span></td>
+            <td><a href="\${ep.api_url}" target="_blank" rel="noopener noreferrer" class="text-truncate d-inline-block" style="max-width:200px;">\${ep.api_url}</a></td>
+            <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
+            <td>\${ep.last_status_code || '-'}</td>
+            <td>\${responseTime}</td>
+            <td>\${lastCheckTime}</td>
+            <td>
+                <div class="form-check form-switch">
+                    <input class="form-check-input llm-visibility-toggle" type="checkbox" data-llm-id="\${ep.id}" \${ep.is_public ? 'checked' : ''}>
+                </div>
+            </td>
+            <td>
+                <div class="btn-group">
+                    <button class="btn btn-sm btn-outline-primary edit-llm-btn" data-id="\${ep.id}" title="编辑">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger delete-llm-btn" data-id="\${ep.id}" data-name="\${ep.model}" title="删除">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </td>
+        \`;
+        tableBody.appendChild(row);
+    });
+
+    // 绑定事件
+    document.querySelectorAll('.edit-llm-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            showLlmEndpointModal(this.getAttribute('data-id'));
+        });
+    });
+
+    document.querySelectorAll('.delete-llm-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            showDeleteLlmEndpointConfirmation(this.getAttribute('data-id'), this.getAttribute('data-name'));
+        });
+    });
+
+    document.querySelectorAll('.llm-visibility-toggle').forEach(toggle => {
+        toggle.addEventListener('change', async function() {
+            const endpointId = this.getAttribute('data-llm-id');
+            const isPublic = this.checked;
+            try {
+                await apiRequest(\`/api/admin/llm-endpoints/\${endpointId}/visibility\`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ is_public: isPublic })
+                });
+                showToast('success', '可见性更新成功');
+            } catch (error) {
+                this.checked = !this.checked;
+                showToast('danger', '更新可见性失败: ' + error.message);
+            }
+        });
+    });
+}
+
+// 显示添加/编辑LLM端点模态框
+function showLlmEndpointModal(endpointIdToEdit = null) {
+    const form = document.getElementById('llmEndpointForm');
+    form.reset();
+    const modalTitle = document.getElementById('llmEndpointModalTitle');
+    const endpointIdInput = document.getElementById('llmEndpointId');
+
+    if (endpointIdToEdit) {
+        const ep = llmEndpointList.find(e => e.id === endpointIdToEdit);
+        if (ep) {
+            modalTitle.textContent = '编辑LLM端点';
+            endpointIdInput.value = ep.id;
+            document.getElementById('llmEndpointUrl').value = ep.api_url;
+            document.getElementById('llmEndpointApiKey').value = ep.api_key || '';
+            document.getElementById('llmEndpointModel').value = ep.model;
+            document.getElementById('llmEndpointPrompt').value = ep.check_prompt || '';
+            document.getElementById('llmEndpointExpected').value = ep.expected_contains || '';
+            document.getElementById('llmEndpointTimeout').value = ep.timeout_ms || 30000;
+        } else {
+            showToast('danger', '未找到要编辑的端点信息');
+            return;
+        }
+    } else {
+        modalTitle.textContent = '添加LLM端点';
+        endpointIdInput.value = '';
+    }
+
+    const modal = new bootstrap.Modal(document.getElementById('llmEndpointModal'));
+    modal.show();
+}
+
+// 保存LLM端点（添加或更新）
+async function saveLlmEndpoint() {
+    const endpointId = document.getElementById('llmEndpointId').value;
+    const api_url = document.getElementById('llmEndpointUrl').value.trim();
+    const api_key = document.getElementById('llmEndpointApiKey').value.trim();
+    const model = document.getElementById('llmEndpointModel').value.trim();
+    const check_prompt = document.getElementById('llmEndpointPrompt').value.trim();
+    const expected_contains = document.getElementById('llmEndpointExpected').value.trim();
+    const timeout_ms = parseInt(document.getElementById('llmEndpointTimeout').value, 10) || 30000;
+
+    if (!api_url) {
+        showToast('warning', '请输入API URL');
+        return;
+    }
+    if (!api_url.startsWith('http://') && !api_url.startsWith('https://')) {
+        showToast('warning', 'URL必须以 http:// 或 https:// 开头');
+        return;
+    }
+    if (!model) {
+        showToast('warning', '请输入模型名称');
+        return;
+    }
+
+    const requestBody = { api_url, api_key, model, check_prompt, expected_contains, timeout_ms };
+    let apiUrl = '/api/admin/llm-endpoints';
+    let method = 'POST';
+
+    if (endpointId) {
+        apiUrl = \`/api/admin/llm-endpoints/\${endpointId}\`;
+        method = 'PUT';
+    }
+
+    try {
+        await apiRequest(apiUrl, { method, body: JSON.stringify(requestBody) });
+
+        const modalInstance = bootstrap.Modal.getInstance(document.getElementById('llmEndpointModal'));
+        if (modalInstance) modalInstance.hide();
+
+        await loadLlmEndpointList();
+        showToast('success', 'LLM端点' + (endpointId ? '更新' : '添加') + '成功');
+    } catch (error) {
+        showToast('danger', '保存LLM端点失败: ' + error.message);
+    }
+}
+
+// 显示删除LLM端点确认模态框
+function showDeleteLlmEndpointConfirmation(endpointId, endpointName) {
+    currentLlmEndpointId = endpointId;
+    document.getElementById('deleteLlmEndpointName').textContent = endpointName;
+    const deleteModal = new bootstrap.Modal(document.getElementById('deleteLlmEndpointModal'));
+    deleteModal.show();
+}
+
+// 删除LLM端点
+async function deleteLlmEndpoint(endpointId) {
+    try {
+        await apiRequest(\`/api/admin/llm-endpoints/\${endpointId}?confirm=true\`, {
+            method: 'DELETE'
+        });
+
+        const deleteModal = bootstrap.Modal.getInstance(document.getElementById('deleteLlmEndpointModal'));
+        deleteModal.hide();
+        await loadLlmEndpointList();
+        showToast('success', 'LLM端点已删除');
+        currentLlmEndpointId = null;
+    } catch (error) {
+        showToast('danger', '删除LLM端点失败: ' + error.message);
+    }
+}
+
+
+// ==================== LLM检查频率设置 ====================
+
+async function loadLlmCheckInterval() {
+    try {
+        const data = await apiRequest('/api/admin/settings/llm-check-interval');
+        const input = document.getElementById('llmCheckInterval');
+        if (input && data?.interval) {
+            input.value = data.interval;
+        }
+    } catch (error) {
+        // 静默处理
+    }
+}
+
+async function saveLlmCheckInterval() {
+    const input = document.getElementById('llmCheckInterval');
+    const interval = parseInt(input.value, 10);
+
+    if (!interval || interval < 1) {
+        showToast('warning', '请输入大于0的整数');
+        return;
+    }
+
+    try {
+        await apiRequest('/api/admin/settings/llm-check-interval', {
+            method: 'POST',
+            body: JSON.stringify({ interval })
+        });
+        showToast('success', 'LLM探测频率已设为每 ' + interval + ' 次Cron执行检查一次');
+    } catch (error) {
+        showToast('danger', '保存失败: ' + error.message);
     }
 }
 
