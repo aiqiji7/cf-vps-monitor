@@ -4592,6 +4592,63 @@ function getIndexHtml() {
         .provider-group-row .btn-link:hover {
             color: inherit;
         }
+        [data-bs-theme="dark"] .provider-group-row > td {
+            background-color: #1f2933 !important;
+            border-top-color: #3a4653;
+            border-bottom-color: #3a4653;
+            box-shadow: inset 3px 0 0 #5b8def;
+        }
+        .provider-status-summary {
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .llm-model-badge {
+            max-width: 18rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            vertical-align: middle;
+        }
+        [data-bs-theme="dark"] .llm-model-badge {
+            background-color: #334155 !important;
+            color: #e2e8f0 !important;
+            border-color: #64748b !important;
+        }
+        [data-bs-theme="dark"] .llm-output-preview,
+        [data-bs-theme="dark"] .provider-status-summary .text-muted,
+        [data-bs-theme="dark"] .mobile-history-label {
+            color: #cbd5e1 !important;
+        }
+        [data-bs-theme="dark"] .provider-child-row > td {
+            border-top-color: #343a40;
+        }
+        [data-bs-theme="dark"] .provider-child-row.status-down > td,
+        [data-bs-theme="dark"] .provider-child-row.status-error > td {
+            background-color: rgba(220, 53, 69, 0.08) !important;
+        }
+        [data-bs-theme="dark"] .provider-child-row.status-timeout > td,
+        [data-bs-theme="dark"] .provider-child-row.status-high-latency > td {
+            background-color: rgba(255, 193, 7, 0.08) !important;
+        }
+        [data-bs-theme="dark"] .provider-child-row.status-up > td {
+            background-color: rgba(25, 135, 84, 0.05) !important;
+        }
+        [data-bs-theme="dark"] .card-body > .status-down,
+        [data-bs-theme="dark"] .card-body > .status-error {
+            background-color: rgba(220, 53, 69, 0.08);
+            border-left: 3px solid #dc3545;
+            padding-left: 0.5rem;
+        }
+        [data-bs-theme="dark"] .card-body > .status-timeout,
+        [data-bs-theme="dark"] .card-body > .status-high-latency {
+            background-color: rgba(255, 193, 7, 0.08);
+            border-left: 3px solid #ffc107;
+            padding-left: 0.5rem;
+        }
+        [data-bs-theme="dark"] .card-body > .status-up {
+            background-color: rgba(25, 135, 84, 0.05);
+            border-left: 3px solid #198754;
+            padding-left: 0.5rem;
+        }
         .provider-child-row > td:first-child {
             padding-left: 1.75rem;
         }
@@ -5139,6 +5196,63 @@ function getLoginHtml() {
         }
         .provider-group-row .btn-link:hover {
             color: inherit;
+        }
+        [data-bs-theme="dark"] .provider-group-row > td {
+            background-color: #1f2933 !important;
+            border-top-color: #3a4653;
+            border-bottom-color: #3a4653;
+            box-shadow: inset 3px 0 0 #5b8def;
+        }
+        .provider-status-summary {
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .llm-model-badge {
+            max-width: 18rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            vertical-align: middle;
+        }
+        [data-bs-theme="dark"] .llm-model-badge {
+            background-color: #334155 !important;
+            color: #e2e8f0 !important;
+            border-color: #64748b !important;
+        }
+        [data-bs-theme="dark"] .llm-output-preview,
+        [data-bs-theme="dark"] .provider-status-summary .text-muted,
+        [data-bs-theme="dark"] .mobile-history-label {
+            color: #cbd5e1 !important;
+        }
+        [data-bs-theme="dark"] .provider-child-row > td {
+            border-top-color: #343a40;
+        }
+        [data-bs-theme="dark"] .provider-child-row.status-down > td,
+        [data-bs-theme="dark"] .provider-child-row.status-error > td {
+            background-color: rgba(220, 53, 69, 0.08) !important;
+        }
+        [data-bs-theme="dark"] .provider-child-row.status-timeout > td,
+        [data-bs-theme="dark"] .provider-child-row.status-high-latency > td {
+            background-color: rgba(255, 193, 7, 0.08) !important;
+        }
+        [data-bs-theme="dark"] .provider-child-row.status-up > td {
+            background-color: rgba(25, 135, 84, 0.05) !important;
+        }
+        [data-bs-theme="dark"] .card-body > .status-down,
+        [data-bs-theme="dark"] .card-body > .status-error {
+            background-color: rgba(220, 53, 69, 0.08);
+            border-left: 3px solid #dc3545;
+            padding-left: 0.5rem;
+        }
+        [data-bs-theme="dark"] .card-body > .status-timeout,
+        [data-bs-theme="dark"] .card-body > .status-high-latency {
+            background-color: rgba(255, 193, 7, 0.08);
+            border-left: 3px solid #ffc107;
+            padding-left: 0.5rem;
+        }
+        [data-bs-theme="dark"] .card-body > .status-up {
+            background-color: rgba(25, 135, 84, 0.05);
+            border-left: 3px solid #198754;
+            padding-left: 0.5rem;
         }
         .provider-child-row > td:first-child {
             padding-left: 1.75rem;
@@ -6100,6 +6214,97 @@ body {
 /* 表格样式 */
 .table th {
     font-weight: 600;
+}
+
+/* LLM Provider grouping and dark-theme readability */
+.provider-group-row > td {
+    background-color: #eef4ff !important;
+    border-top: 1px solid #d7e3ff;
+    border-bottom: 1px solid #d7e3ff;
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+}
+
+.provider-group-row .btn-link {
+    font-weight: 600;
+    color: inherit;
+}
+
+.provider-group-row .btn-link:hover {
+    color: inherit;
+}
+
+.provider-status-summary {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.llm-model-badge {
+    max-width: 18rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+}
+
+.provider-child-row > td:first-child {
+    padding-left: 1.75rem;
+}
+
+[data-bs-theme="dark"] .provider-group-row > td {
+    background-color: #1f2933 !important;
+    border-top-color: #3a4653;
+    border-bottom-color: #3a4653;
+    box-shadow: inset 3px 0 0 #5b8def;
+}
+
+[data-bs-theme="dark"] .llm-model-badge {
+    background-color: #334155 !important;
+    color: #e2e8f0 !important;
+    border-color: #64748b !important;
+}
+
+[data-bs-theme="dark"] .llm-output-preview,
+[data-bs-theme="dark"] .provider-status-summary .text-muted,
+[data-bs-theme="dark"] .mobile-history-label {
+    color: #cbd5e1 !important;
+}
+
+[data-bs-theme="dark"] .provider-child-row > td {
+    border-top-color: #343a40;
+}
+
+[data-bs-theme="dark"] .provider-child-row.status-down > td,
+[data-bs-theme="dark"] .provider-child-row.status-error > td {
+    background-color: rgba(220, 53, 69, 0.08) !important;
+}
+
+[data-bs-theme="dark"] .provider-child-row.status-timeout > td,
+[data-bs-theme="dark"] .provider-child-row.status-high-latency > td {
+    background-color: rgba(255, 193, 7, 0.08) !important;
+}
+
+[data-bs-theme="dark"] .provider-child-row.status-up > td {
+    background-color: rgba(25, 135, 84, 0.05) !important;
+}
+
+[data-bs-theme="dark"] .card-body > .status-down,
+[data-bs-theme="dark"] .card-body > .status-error {
+    background-color: rgba(220, 53, 69, 0.08);
+    border-left: 3px solid #dc3545;
+    padding-left: 0.5rem;
+}
+
+[data-bs-theme="dark"] .card-body > .status-timeout,
+[data-bs-theme="dark"] .card-body > .status-high-latency {
+    background-color: rgba(255, 193, 7, 0.08);
+    border-left: 3px solid #ffc107;
+    padding-left: 0.5rem;
+}
+
+[data-bs-theme="dark"] .card-body > .status-up {
+    background-color: rgba(25, 135, 84, 0.05);
+    border-left: 3px solid #198754;
+    padding-left: 0.5rem;
 }
 
 /* Modal centering and light theme transparency */
@@ -7794,9 +7999,6 @@ function groupLlmEndpointsByProvider(endpoints) {
     });
 
     groups.forEach((group) => {
-        if (!group.providerName) {
-            group.providerName = getProviderFallbackName(group.api_url);
-        }
         if (typeof llmProviderExpansionState[group.key] === 'undefined') {
             llmProviderExpansionState[group.key] = true;
         }
@@ -7805,26 +8007,47 @@ function groupLlmEndpointsByProvider(endpoints) {
     return groups;
 }
 
-function getProviderStatusInfo(group) {
-    const statuses = group.endpoints.map(ep => ep.last_status);
-    if (statuses.some(status => ['DOWN', 'ERROR'].includes(status))) return getSiteStatusBadge('DOWN');
-    if (statuses.includes('TIMEOUT')) return getSiteStatusBadge('TIMEOUT');
-    if (statuses.includes('HIGH_LATENCY')) return getSiteStatusBadge('HIGH_LATENCY');
-    if (statuses.includes('UP')) return getSiteStatusBadge('UP');
-    return getSiteStatusBadge('PENDING');
+function getProviderStatusSummary(group) {
+    const statusGroups = [
+        { key: 'DOWN', statuses: ['DOWN', 'ERROR'], text: '故障', badgeStatus: 'DOWN', count: 0 },
+        { key: 'TIMEOUT', statuses: ['TIMEOUT'], text: '超时', badgeStatus: 'TIMEOUT', count: 0 },
+        { key: 'HIGH_LATENCY', statuses: ['HIGH_LATENCY'], text: '高延迟', badgeStatus: 'HIGH_LATENCY', count: 0 },
+        { key: 'UP', statuses: ['UP'], text: '正常', badgeStatus: 'UP', count: 0 },
+        { key: 'PENDING', statuses: ['PENDING', null, undefined, ''], text: '待检测/未知', badgeStatus: 'PENDING', count: 0 }
+    ];
+    const knownStatuses = new Set(statusGroups.flatMap(item => item.statuses).filter(Boolean));
+
+    group.endpoints.forEach((endpoint) => {
+        const status = endpoint.last_status || 'PENDING';
+        const matchedGroup = statusGroups.find(item => item.statuses.includes(status));
+        if (matchedGroup) {
+            matchedGroup.count += 1;
+        } else if (!knownStatuses.has(status)) {
+            statusGroups[statusGroups.length - 1].count += 1;
+        }
+    });
+
+    return statusGroups
+        .filter(item => item.count > 0)
+        .map(item => ({ ...item, badge: getSiteStatusBadge(item.badgeStatus) }));
+}
+
+function renderProviderStatusSummary(group) {
+    return getProviderStatusSummary(group)
+        .map(item => '<span class="badge ' + item.badge.class + '">' + item.text + ' ' + item.count + '</span>')
+        .join('');
+}
+
+function getLlmStatusRowClass(status) {
+    const normalizedStatus = (status || 'PENDING').toLowerCase().replace(/_/g, '-').replace(/[^a-z0-9-]/g, '-');
+    return 'status-' + normalizedStatus;
 }
 
 function getProviderHeaderMeta(group) {
-    const hostName = getProviderFallbackName(group.api_url);
     const customName = (group.providerName || '').trim();
-    const childModels = new Set(group.endpoints.map(ep => (ep.model || '').trim()).filter(Boolean));
-    const conflictsWithModel = customName && childModels.has(customName);
 
     return {
-        title: customName && !conflictsWithModel ? customName : hostName,
-        subtitle: customName && customName !== hostName
-            ? (conflictsWithModel ? '别名: ' + customName : hostName)
-            : (group.api_url || '-'),
+        title: customName || group.api_url || '未命名 Provider',
         endpointText: group.api_url || '-'
     };
 }
@@ -8813,7 +9036,7 @@ async function renderGroupedLlmStatusTable(endpoints) {
 
     providerGroups.forEach(group => {
         const expanded = llmProviderExpansionState[group.key] !== false;
-        const providerStatus = getProviderStatusInfo(group);
+        const providerStatusSummary = renderProviderStatusSummary(group);
         const providerHeader = getProviderHeaderMeta(group);
         const providerRow = document.createElement('tr');
         providerRow.className = 'provider-group-row';
@@ -8825,11 +9048,10 @@ async function renderGroupedLlmStatusTable(endpoints) {
                             <i class="bi \${expanded ? 'bi-caret-down-fill' : 'bi-caret-right-fill'} me-1"></i>
                             <strong>\${escapeHtml(providerHeader.title)}</strong>
                         </button>
-                        <div><small class="text-muted">\${escapeHtml(providerHeader.subtitle)}</small></div>
                     </div>
-                    <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                    <div class="provider-status-summary d-flex align-items-center gap-2 flex-shrink-0">
                         <small class="text-muted">\${group.endpoints.length} 个模型</small>
-                        <span class="badge \${providerStatus.class}">\${providerStatus.text}</span>
+                        \${providerStatusSummary}
                     </div>
                 </div>
             </td>
@@ -8839,7 +9061,7 @@ async function renderGroupedLlmStatusTable(endpoints) {
         group.endpoints.forEach(ep => {
             const row = document.createElement('tr');
             row.dataset.providerKey = group.key;
-            row.className = 'provider-child-row';
+            row.className = 'provider-child-row ' + getLlmStatusRowClass(ep.last_status);
             row.style.display = expanded ? '' : 'none';
 
             const statusInfo = getSiteStatusBadge(ep.last_status);
@@ -8855,12 +9077,12 @@ async function renderGroupedLlmStatusTable(endpoints) {
             historyCell.appendChild(historyContainer);
 
             row.innerHTML = \`
-                <td><span class="ms-3 badge bg-info-subtle text-dark border">\${escapeHtml(ep.model)}</span></td>
+                <td><span class="ms-3 badge bg-info-subtle text-dark border llm-model-badge" title="\${escapeHtml(ep.model)}">\${escapeHtml(ep.model)}</span></td>
                 <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
                 <td>\${ep.last_status_code || '-'}</td>
                 <td>\${responseTime}</td>
                 <td>\${lastCheckTime}</td>
-                <td><small class="text-muted" title="\${escapeHtml(ep.last_output_preview || '')}">\${escapeHtml(outputPreview)}</small></td>
+                <td><small class="text-muted llm-output-preview" title="\${escapeHtml(ep.last_output_preview || '')}">\${escapeHtml(outputPreview)}</small></td>
             \`;
             row.appendChild(historyCell);
             tableBody.appendChild(row);
@@ -8894,7 +9116,7 @@ function renderGroupedMobileLlmCards(endpoints) {
 
     providerGroups.forEach(group => {
         const expanded = llmProviderExpansionState[group.key] !== false;
-        const providerStatus = getProviderStatusInfo(group);
+        const providerStatusSummary = renderProviderStatusSummary(group);
         const providerHeader = getProviderHeaderMeta(group);
         const card = document.createElement('div');
         card.className = 'card mb-2';
@@ -8906,9 +9128,9 @@ function renderGroupedMobileLlmCards(endpoints) {
                 <button type="button" class="btn btn-sm btn-link text-decoration-none p-0 public-provider-toggle" data-provider-key="\${escapeHtml(group.key)}">
                     <i class="bi \${expanded ? 'bi-caret-down-fill' : 'bi-caret-right-fill'} me-1"></i><strong>\${escapeHtml(providerHeader.title)}</strong>
                 </button>
-                <span class="badge \${providerStatus.class}">\${providerStatus.text}</span>
+                <small class="text-muted">\${group.endpoints.length} 个模型</small>
             </div>
-            <div class="mt-1 mb-2"><small class="text-muted">\${escapeHtml(providerHeader.subtitle)}</small></div>
+            <div class="provider-status-summary d-flex align-items-center gap-2 mt-2">\${providerStatusSummary}</div>
         \`;
 
         group.endpoints.forEach(ep => {
@@ -8918,7 +9140,7 @@ function renderGroupedMobileLlmCards(endpoints) {
             const item = document.createElement('div');
             item.dataset.providerKey = group.key;
             item.style.display = expanded ? '' : 'none';
-            item.className = 'border-top pt-2 mt-2';
+            item.className = 'border-top pt-2 mt-2 ' + getLlmStatusRowClass(ep.last_status);
             item.innerHTML = \`
                 <div class="d-flex justify-content-between align-items-center">
                     <strong>\${escapeHtml(ep.model)}</strong>
@@ -9479,9 +9701,6 @@ function groupLlmEndpointsByProvider(endpoints) {
     });
 
     groups.forEach((group) => {
-        if (!group.providerName) {
-            group.providerName = getProviderFallbackName(group.api_url);
-        }
         if (typeof llmProviderExpansionState[group.key] === 'undefined') {
             llmProviderExpansionState[group.key] = true;
         }
@@ -9490,13 +9709,49 @@ function groupLlmEndpointsByProvider(endpoints) {
     return groups;
 }
 
-function getProviderStatusInfo(group) {
-    const statuses = group.endpoints.map(ep => ep.last_status);
-    if (statuses.some(status => ['DOWN', 'ERROR'].includes(status))) return getSiteStatusBadge('DOWN');
-    if (statuses.includes('TIMEOUT')) return getSiteStatusBadge('TIMEOUT');
-    if (statuses.includes('HIGH_LATENCY')) return getSiteStatusBadge('HIGH_LATENCY');
-    if (statuses.includes('UP')) return getSiteStatusBadge('UP');
-    return getSiteStatusBadge('PENDING');
+function getProviderStatusSummary(group) {
+    const statusGroups = [
+        { key: 'DOWN', statuses: ['DOWN', 'ERROR'], text: '故障', badgeStatus: 'DOWN', count: 0 },
+        { key: 'TIMEOUT', statuses: ['TIMEOUT'], text: '超时', badgeStatus: 'TIMEOUT', count: 0 },
+        { key: 'HIGH_LATENCY', statuses: ['HIGH_LATENCY'], text: '高延迟', badgeStatus: 'HIGH_LATENCY', count: 0 },
+        { key: 'UP', statuses: ['UP'], text: '正常', badgeStatus: 'UP', count: 0 },
+        { key: 'PENDING', statuses: ['PENDING', null, undefined, ''], text: '待检测/未知', badgeStatus: 'PENDING', count: 0 }
+    ];
+    const knownStatuses = new Set(statusGroups.flatMap(item => item.statuses).filter(Boolean));
+
+    group.endpoints.forEach((endpoint) => {
+        const status = endpoint.last_status || 'PENDING';
+        const matchedGroup = statusGroups.find(item => item.statuses.includes(status));
+        if (matchedGroup) {
+            matchedGroup.count += 1;
+        } else if (!knownStatuses.has(status)) {
+            statusGroups[statusGroups.length - 1].count += 1;
+        }
+    });
+
+    return statusGroups
+        .filter(item => item.count > 0)
+        .map(item => ({ ...item, badge: getSiteStatusBadge(item.badgeStatus) }));
+}
+
+function renderProviderStatusSummary(group) {
+    return getProviderStatusSummary(group)
+        .map(item => '<span class="badge ' + item.badge.class + '">' + item.text + ' ' + item.count + '</span>')
+        .join('');
+}
+
+function getLlmStatusRowClass(status) {
+    const normalizedStatus = (status || 'PENDING').toLowerCase().replace(/_/g, '-').replace(/[^a-z0-9-]/g, '-');
+    return 'status-' + normalizedStatus;
+}
+
+function getProviderHeaderMeta(group) {
+    const customName = (group.providerName || '').trim();
+
+    return {
+        title: customName || group.api_url || '未命名 Provider',
+        endpointText: group.api_url || '-'
+    };
 }
 
 // Function to fetch VPS refresh interval and start periodic VPS data updates
@@ -12362,7 +12617,7 @@ function renderGroupedAdminLlmTable(endpoints) {
     const providerGroups = groupLlmEndpointsByProvider(endpoints);
     providerGroups.forEach((group) => {
         const expanded = llmProviderExpansionState[group.key] !== false;
-        const providerStatus = getProviderStatusInfo(group);
+        const providerStatusSummary = renderProviderStatusSummary(group);
         const providerHeader = getProviderHeaderMeta(group);
         const groupRow = document.createElement('tr');
         groupRow.className = 'provider-group-row';
@@ -12374,11 +12629,10 @@ function renderGroupedAdminLlmTable(endpoints) {
                             <i class="bi \${expanded ? 'bi-caret-down-fill' : 'bi-caret-right-fill'} me-1"></i>
                             <strong>\${escapeHtml(providerHeader.title)}</strong>
                         </button>
-                        <div><small class="text-muted">\${escapeHtml(providerHeader.subtitle)}</small></div>
                     </div>
-                    <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                    <div class="provider-status-summary d-flex align-items-center gap-2 flex-shrink-0">
                         <small class="text-muted">\${group.endpoints.length} 个模型</small>
-                        <span class="badge \${providerStatus.class}">\${providerStatus.text}</span>
+                        \${providerStatusSummary}
                     </div>
                 </div>
             </td>
@@ -12390,6 +12644,7 @@ function renderGroupedAdminLlmTable(endpoints) {
             row.setAttribute('data-llm-id', ep.id);
             row.dataset.providerKey = group.key;
             row.classList.add('provider-child-row');
+            row.classList.add(getLlmStatusRowClass(ep.last_status));
             row.classList.add('llm-row-draggable');
             row.draggable = true;
             row.style.display = expanded ? '' : 'none';
@@ -12400,7 +12655,7 @@ function renderGroupedAdminLlmTable(endpoints) {
 
             row.innerHTML = \`
                 <td><i class="bi bi-grip-vertical text-muted me-2" style="cursor: grab;" title="拖拽排序"></i></td>
-                <td><span class="ms-3 badge bg-info-subtle text-dark border">\${escapeHtml(ep.model)}</span></td>
+                <td><span class="ms-3 badge bg-info-subtle text-dark border llm-model-badge" title="\${escapeHtml(ep.model)}">\${escapeHtml(ep.model)}</span></td>
                 <td><a href="\${escapeHtml(ep.api_url)}" target="_blank" rel="noopener noreferrer" class="text-truncate d-inline-block" style="max-width:200px;">\${escapeHtml(ep.api_url)}</a></td>
                 <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
                 <td>\${ep.last_status_code || '-'}</td>
@@ -12449,7 +12704,7 @@ function renderGroupedMobileAdminLlmCards(endpoints) {
     const providerGroups = groupLlmEndpointsByProvider(endpoints);
     providerGroups.forEach(group => {
         const expanded = llmProviderExpansionState[group.key] !== false;
-        const providerStatus = getProviderStatusInfo(group);
+        const providerStatusSummary = renderProviderStatusSummary(group);
         const providerHeader = getProviderHeaderMeta(group);
         const card = document.createElement('div');
         card.className = 'card mb-2';
@@ -12461,9 +12716,9 @@ function renderGroupedMobileAdminLlmCards(endpoints) {
                 <button type="button" class="btn btn-sm btn-link text-decoration-none p-0 admin-provider-toggle" data-provider-key="\${escapeHtml(group.key)}">
                     <i class="bi \${expanded ? 'bi-caret-down-fill' : 'bi-caret-right-fill'} me-1"></i><strong>\${escapeHtml(providerHeader.title)}</strong>
                 </button>
-                <span class="badge \${providerStatus.class}">\${providerStatus.text}</span>
+                <small class="text-muted">\${group.endpoints.length} 个模型</small>
             </div>
-            <div class="mt-1 mb-2"><small class="text-muted">\${escapeHtml(providerHeader.subtitle)}</small></div>
+            <div class="provider-status-summary d-flex align-items-center gap-2 mt-2">\${providerStatusSummary}</div>
         \`;
 
         group.endpoints.forEach(ep => {
@@ -12473,7 +12728,7 @@ function renderGroupedMobileAdminLlmCards(endpoints) {
             const item = document.createElement('div');
             item.dataset.providerKey = group.key;
             item.style.display = expanded ? '' : 'none';
-            item.className = 'border-top pt-2 mt-2';
+            item.className = 'border-top pt-2 mt-2 ' + getLlmStatusRowClass(ep.last_status);
             item.innerHTML = \`
                 <div class="d-flex justify-content-between align-items-center">
                     <strong>\${escapeHtml(ep.model)}</strong>
