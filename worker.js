@@ -952,7 +952,8 @@ const D1_SCHEMAS = {
       last_output_preview TEXT,
       sort_order INTEGER,
       last_notified_down_at INTEGER DEFAULT NULL,
-      is_public INTEGER DEFAULT 1
+      is_public INTEGER DEFAULT 1,
+      enable_notifications INTEGER DEFAULT 1
     );`,
 
   llm_status_history: `
@@ -996,7 +997,8 @@ async function applySchemaAlterations(db) {
     "ALTER TABLE admin_credentials ADD COLUMN must_change_password INTEGER DEFAULT 0",
     "ALTER TABLE admin_credentials ADD COLUMN password_changed_at INTEGER DEFAULT NULL",
     "ALTER TABLE servers ADD COLUMN is_public INTEGER DEFAULT 1",
-    "ALTER TABLE monitored_sites ADD COLUMN is_public INTEGER DEFAULT 1"
+    "ALTER TABLE monitored_sites ADD COLUMN is_public INTEGER DEFAULT 1",
+    "ALTER TABLE monitored_llm_endpoints ADD COLUMN enable_notifications INTEGER DEFAULT 1"
   ];
 
   for (const alterSql of alterStatements) {
@@ -2528,7 +2530,7 @@ async function handleApiRequest(request, env, ctx) {
       const { results } = await env.DB.prepare(`
         SELECT id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms,
                added_at, last_checked, last_status, last_status_code, last_response_time_ms,
-               last_output_preview, sort_order, last_notified_down_at, is_public
+               last_output_preview, sort_order, last_notified_down_at, is_public, enable_notifications
         FROM monitored_llm_endpoints
         ORDER BY sort_order ASC NULLS LAST, model ASC
       `).all();
@@ -2952,6 +2954,27 @@ async function handleApiRequest(request, env, ctx) {
       return createSuccessResponse({}, corsHeaders);
     } catch (error) {
       return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // LLM端点通知开关切换（管理员）
+  if (path.match(/\/api\/admin\/llm-endpoints\/[^\/]+\/notifications$/) && method === 'PUT') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const pathParts = path.split('/');
+      const endpointId = pathParts[pathParts.length - 2];
+      const { enable_notifications } = await request.json();
+
+      await env.DB.prepare('UPDATE monitored_llm_endpoints SET enable_notifications = ? WHERE id = ?')
+        .bind(enable_notifications ? 1 : 0, endpointId).run();
+
+      return createSuccessResponse({ id: endpointId, enable_notifications, message: '通知设置更新成功' }, corsHeaders);
+    } catch (error) {
+      return handleDbError(error, corsHeaders, '更新LLM端点通知设置');
     }
   }
 
@@ -3604,18 +3627,20 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
 
   const name = model;
 
-  // 获取当前状态
+  // 获取当前状态和通知设置
   let previousStatus = 'PENDING';
   let lastNotifiedDownAt = null;
+  let enableNotifications = 1;
 
   try {
     const details = await db.prepare(
-      'SELECT last_status, last_notified_down_at FROM monitored_llm_endpoints WHERE id = ?'
+      'SELECT last_status, last_notified_down_at, enable_notifications FROM monitored_llm_endpoints WHERE id = ?'
     ).bind(id).first();
 
     if (details) {
       previousStatus = details.last_status || 'PENDING';
       lastNotifiedDownAt = details.last_notified_down_at;
+      enableNotifications = details.enable_notifications !== 0 ? 1 : 0;
     }
   } catch (error) {
     // 静默处理
@@ -3700,24 +3725,30 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
   const checkTime = Math.floor(Date.now() / 1000);
   let newLastNotifiedDownAt = lastNotifiedDownAt;
 
-  // 通知逻辑
+  // 通知逻辑（仅在启用通知时发送通知，但状态追踪独立于通知开关）
   if (['DOWN', 'TIMEOUT', 'ERROR'].includes(newStatus)) {
     const isFirstTimeDown = !['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus);
     if (isFirstTimeDown) {
-      const message = `🔴 LLM端点故障: *${name}* 当前状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
-      ctx.waitUntil(sendNotifications(db, message));
+      if (enableNotifications) {
+        const message = `🔴 LLM端点故障: *${name}* 当前状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
+        ctx.waitUntil(sendNotifications(db, message));
+      }
       newLastNotifiedDownAt = checkTime;
     } else {
       const shouldResend = lastNotifiedDownAt === null || (checkTime - lastNotifiedDownAt > NOTIFICATION_INTERVAL_SECONDS);
       if (shouldResend) {
-        const message = `🔴 LLM端点持续故障: *${name}* 状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
-        ctx.waitUntil(sendNotifications(db, message));
+        if (enableNotifications) {
+          const message = `🔴 LLM端点持续故障: *${name}* 状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
+          ctx.waitUntil(sendNotifications(db, message));
+        }
         newLastNotifiedDownAt = checkTime;
       }
     }
   } else if (newStatus === 'UP' && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
-    const message = `✅ LLM端点恢复: *${name}* 已恢复在线!\n模型: ${model}\nURL: ${api_url}`;
-    ctx.waitUntil(sendNotifications(db, message));
+    if (enableNotifications) {
+      const message = `✅ LLM端点恢复: *${name}* 已恢复在线!\n模型: ${model}\nURL: ${api_url}`;
+      ctx.waitUntil(sendNotifications(db, message));
+    }
     newLastNotifiedDownAt = null;
   }
 
@@ -5406,6 +5437,7 @@ function getAdminHtml() {
                                     <th>响应时间 (ms)</th>
                                     <th>最后检查</th>
                                     <th>显示</th>
+                                    <th>通知</th>
                                     <th>操作</th>
                                 </tr>
                             </thead>
@@ -8425,26 +8457,43 @@ function renderMobileLlmCards(endpoints) {
         return;
     }
 
-    let cardsHtml = '';
+    container.innerHTML = '';
     for (const ep of endpoints) {
         const statusInfo = getSiteStatusBadge(ep.last_status);
         const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
         const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
         const displayName = ep.model;
 
-        cardsHtml += \`
-            <div class="card mb-2">
-                <div class="card-body p-2">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <strong>\${displayName}</strong>
-                        <span class="badge \${statusInfo.class}">\${statusInfo.text}</span>
-                    </div>
-                    <div class="mt-1"><small>响应: \${responseTime} | \${lastCheckTime}</small></div>
-                </div>
+        const card = document.createElement('div');
+        card.className = 'card mb-2';
+
+        const cardBody = document.createElement('div');
+        cardBody.className = 'card-body p-2';
+
+        cardBody.innerHTML = \`
+            <div class="d-flex justify-content-between align-items-center">
+                <strong>\${displayName}</strong>
+                <span class="badge \${statusInfo.class}">\${statusInfo.text}</span>
             </div>
+            <div class="mt-1"><small>响应: \${responseTime} | \${lastCheckTime}</small></div>
         \`;
+
+        // 24小时历史记录 - 始终显示，即使没有数据
+        const historyContainer = document.createElement('div');
+        historyContainer.className = 'mobile-history-container';
+        historyContainer.innerHTML = \`
+            <div class="mobile-history-label">24小时记录</div>
+            <div class="history-bar-container"></div>
+        \`;
+        cardBody.appendChild(historyContainer);
+
+        // 使用统一的历史记录渲染函数
+        const historyBarContainer = historyContainer.querySelector('.history-bar-container');
+        renderSiteHistoryBar(historyBarContainer, ep.history || []);
+
+        card.appendChild(cardBody);
+        container.appendChild(card);
     }
-    container.innerHTML = cardsHtml;
 }
 
 // Get website status badge class and text (copied from admin.js for reuse)
@@ -10458,6 +10507,7 @@ async function loadLlmEndpointList() {
         const data = await apiRequest('/api/admin/llm-endpoints');
         llmEndpointList = data.endpoints || [];
         renderLlmEndpointTable(llmEndpointList);
+        renderMobileAdminLlmCards(llmEndpointList);
     } catch (error) {
         showToast('danger', '加载LLM端点列表失败: ' + error.message);
     }
@@ -10471,7 +10521,7 @@ function renderLlmEndpointTable(endpoints) {
     tableBody.innerHTML = '';
 
     if (endpoints.length === 0) {
-        tableBody.innerHTML = '<tr><td colspan="9" class="text-center">暂无LLM端点</td></tr>';
+        tableBody.innerHTML = '<tr><td colspan="10" class="text-center">暂无LLM端点</td></tr>';
         return;
     }
 
@@ -10499,6 +10549,11 @@ function renderLlmEndpointTable(endpoints) {
                 </div>
             </td>
             <td>
+                <div class="form-check form-switch">
+                    <input class="form-check-input llm-notification-toggle" type="checkbox" data-llm-id="\${ep.id}" \${ep.enable_notifications !== 0 ? 'checked' : ''}>
+                </div>
+            </td>
+            <td>
                 <div class="btn-group">
                     <button class="btn btn-sm btn-outline-primary edit-llm-btn" data-id="\${ep.id}" title="编辑">
                         <i class="bi bi-pencil"></i>
@@ -10512,20 +10567,20 @@ function renderLlmEndpointTable(endpoints) {
         tableBody.appendChild(row);
     });
 
-    // 绑定事件
-    document.querySelectorAll('.edit-llm-btn').forEach(btn => {
+    // 桌面端事件 - 限域到 tableBody
+    tableBody.querySelectorAll('.edit-llm-btn').forEach(btn => {
         btn.addEventListener('click', function() {
             showLlmEndpointModal(this.getAttribute('data-id'));
         });
     });
 
-    document.querySelectorAll('.delete-llm-btn').forEach(btn => {
+    tableBody.querySelectorAll('.delete-llm-btn').forEach(btn => {
         btn.addEventListener('click', function() {
             showDeleteLlmEndpointConfirmation(this.getAttribute('data-id'), this.getAttribute('data-name'));
         });
     });
 
-    document.querySelectorAll('.llm-visibility-toggle').forEach(toggle => {
+    tableBody.querySelectorAll('.llm-visibility-toggle').forEach(toggle => {
         toggle.addEventListener('change', async function() {
             const endpointId = this.getAttribute('data-llm-id');
             const isPublic = this.checked;
@@ -10538,6 +10593,23 @@ function renderLlmEndpointTable(endpoints) {
             } catch (error) {
                 this.checked = !this.checked;
                 showToast('danger', '更新可见性失败: ' + error.message);
+            }
+        });
+    });
+
+    tableBody.querySelectorAll('.llm-notification-toggle').forEach(toggle => {
+        toggle.addEventListener('change', async function() {
+            const endpointId = this.getAttribute('data-llm-id');
+            const enableNotifications = this.checked;
+            try {
+                await apiRequest(\`/api/admin/llm-endpoints/\${endpointId}/notifications\`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ enable_notifications: enableNotifications })
+                });
+                showToast('success', '通知设置更新成功');
+            } catch (error) {
+                this.checked = !this.checked;
+                showToast('danger', '更新通知设置失败: ' + error.message);
             }
         });
     });
@@ -11572,6 +11644,105 @@ async function toggleSiteVisibility(siteId, isPublic) {
 // 移动端查看服务器API密钥
 function showServerApiKey(serverId) {
     viewApiKey(serverId);
+}
+
+// 渲染移动端LLM管理卡片
+function renderMobileAdminLlmCards(endpoints) {
+    const mobileContainer = document.getElementById('mobileAdminLlmContainer');
+    if (!mobileContainer) return;
+
+    mobileContainer.innerHTML = '';
+
+    if (!endpoints || endpoints.length === 0) {
+        mobileContainer.innerHTML = '<div class="text-center p-3 text-muted">暂无LLM端点数据</div>';
+        return;
+    }
+
+    endpoints.forEach(ep => {
+        const card = document.createElement('div');
+        card.className = 'card mb-2';
+
+        const statusInfo = getSiteStatusBadge(ep.last_status);
+        const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
+        const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
+
+        card.innerHTML = \`
+            <div class="card-body p-2">
+                <div class="d-flex justify-content-between align-items-center">
+                    <strong>\${ep.model}</strong>
+                    <span class="badge \${statusInfo.class}">\${statusInfo.text}</span>
+                </div>
+                <div class="mt-1"><small>响应: \${responseTime} | \${lastCheckTime}</small></div>
+                <div class="mt-2 d-flex justify-content-between align-items-center">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input llm-visibility-toggle" type="checkbox" data-llm-id="\${ep.id}" \${ep.is_public ? 'checked' : ''}>
+                        <label class="form-check-label ms-1">显示</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input llm-notification-toggle" type="checkbox" data-llm-id="\${ep.id}" \${ep.enable_notifications !== 0 ? 'checked' : ''}>
+                        <label class="form-check-label ms-1">通知</label>
+                    </div>
+                </div>
+                <div class="mt-2 d-flex gap-2">
+                    <button class="btn btn-outline-primary btn-sm flex-fill edit-llm-btn" data-id="\${ep.id}">
+                        <i class="bi bi-pencil"></i> 编辑
+                    </button>
+                    <button class="btn btn-outline-danger btn-sm flex-fill delete-llm-btn" data-id="\${ep.id}" data-name="\${ep.model}">
+                        <i class="bi bi-trash"></i> 删除
+                    </button>
+                </div>
+            </div>
+        \`;
+
+        mobileContainer.appendChild(card);
+    });
+
+    // 绑定移动端事件 - 限域到 mobileContainer
+    mobileContainer.querySelectorAll('.edit-llm-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            showLlmEndpointModal(this.getAttribute('data-id'));
+        });
+    });
+
+    mobileContainer.querySelectorAll('.delete-llm-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            showDeleteLlmEndpointConfirmation(this.getAttribute('data-id'), this.getAttribute('data-name'));
+        });
+    });
+
+    mobileContainer.querySelectorAll('.llm-visibility-toggle').forEach(toggle => {
+        toggle.addEventListener('change', async function() {
+            const endpointId = this.getAttribute('data-llm-id');
+            const isPublic = this.checked;
+            try {
+                await apiRequest(\`/api/admin/llm-endpoints/\${endpointId}/visibility\`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ is_public: isPublic })
+                });
+                showToast('success', '可见性更新成功');
+            } catch (error) {
+                this.checked = !this.checked;
+                showToast('danger', '更新可见性失败: ' + error.message);
+            }
+        });
+    });
+
+    mobileContainer.querySelectorAll('.llm-notification-toggle').forEach(toggle => {
+        toggle.addEventListener('change', async function() {
+            const endpointId = this.getAttribute('data-llm-id');
+            const enableNotifications = this.checked;
+            try {
+                await apiRequest(\`/api/admin/llm-endpoints/\${endpointId}/notifications\`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ enable_notifications: enableNotifications })
+                });
+                showToast('success', '通知设置更新成功');
+            } catch (error) {
+                this.checked = !this.checked;
+                showToast('danger', '更新通知设置失败: ' + error.message);
+            }
+        });
+    });
 }
 
 // ==================== 全局背景设置同步功能 ====================
