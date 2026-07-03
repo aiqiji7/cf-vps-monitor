@@ -132,14 +132,27 @@ const WEBSITE_HIGH_LATENCY_MS = 3000;       // 网站HEAD检查 >3s 视为高延
 const WEBSITE_CHECK_TIMEOUT_MS = 15000;     // 网站检查超时时间（原10s，提高以容纳高延迟判定）
 const LLM_HIGH_LATENCY_MS = 20000;          // LLM POST+推理 >20s 视为高延迟
 const DEFAULT_LLM_TIMEOUT_MS = 45000;       // LLM 默认超时
-const MIN_LLM_TIMEOUT_MS = 21000;           // LLM 超时下限，必须 > LLM_HIGH_LATENCY_MS
+const MIN_LLM_TIMEOUT_MS = 21000;           // LLM 默认超时下限，实际下限需高于高延迟阈值
+const MIN_LLM_TIMEOUT_BUFFER_MS = 1000;     // LLM 超时需至少比高延迟阈值多 1 秒
 const MAX_LLM_TIMEOUT_MS = 120000;          // LLM 超时上限
 
-// 规范化 LLM 超时：缺省/越界回退到默认值
-function normalizeLlmTimeout(timeout_ms) {
+function parsePositiveInteger(value, fallback) {
+  const parsed = parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getEffectiveMinLlmTimeout(llmHighLatencyMs = LLM_HIGH_LATENCY_MS) {
+  const threshold = parsePositiveInteger(llmHighLatencyMs, LLM_HIGH_LATENCY_MS);
+  return Math.max(MIN_LLM_TIMEOUT_MS, threshold + MIN_LLM_TIMEOUT_BUFFER_MS);
+}
+
+// 规范化 LLM 超时：缺省/越界回退到默认值或当前有效下限
+function normalizeLlmTimeout(timeout_ms, llmHighLatencyMs = LLM_HIGH_LATENCY_MS) {
   const v = Number(timeout_ms);
-  if (!Number.isFinite(v) || v < MIN_LLM_TIMEOUT_MS || v > MAX_LLM_TIMEOUT_MS) {
-    return DEFAULT_LLM_TIMEOUT_MS;
+  const minTimeoutMs = getEffectiveMinLlmTimeout(llmHighLatencyMs);
+  const fallbackTimeout = Math.min(MAX_LLM_TIMEOUT_MS, Math.max(DEFAULT_LLM_TIMEOUT_MS, minTimeoutMs));
+  if (!Number.isFinite(v) || v < minTimeoutMs || v > MAX_LLM_TIMEOUT_MS) {
+    return fallbackTimeout;
   }
   return Math.floor(v);
 }
@@ -211,7 +224,7 @@ class ConfigCache {
     if (cached) return cached;
 
     const settings = await db.prepare(
-      'SELECT * FROM app_config WHERE key IN ("vps_report_interval", "site_check_interval")'
+      'SELECT key, value FROM app_config WHERE key IN ("vps_report_interval_seconds", "llm_check_interval", "website_high_latency_ms", "llm_high_latency_ms")'
     ).all();
 
     if (settings?.results) {
@@ -571,6 +584,42 @@ async function getVpsReportInterval(env) {
   vpsIntervalCache.value = 60;
   vpsIntervalCache.timestamp = now;
   return 60;
+}
+
+async function getMonitoringThresholds(db) {
+  try {
+    const settings = await configCache.getMonitoringSettings(db);
+    const settingsMap = new Map((settings || []).map(item => [item.key, item.value]));
+
+    return {
+      websiteHighLatencyMs: parsePositiveInteger(settingsMap.get('website_high_latency_ms'), WEBSITE_HIGH_LATENCY_MS),
+      llmHighLatencyMs: parsePositiveInteger(settingsMap.get('llm_high_latency_ms'), LLM_HIGH_LATENCY_MS)
+    };
+  } catch (error) {
+    return {
+      websiteHighLatencyMs: WEBSITE_HIGH_LATENCY_MS,
+      llmHighLatencyMs: LLM_HIGH_LATENCY_MS
+    };
+  }
+}
+
+async function getExistingProviderName(db, apiUrl) {
+  if (!apiUrl) return '';
+  try {
+    const row = await db.prepare(
+      `SELECT name FROM monitored_llm_endpoints
+       WHERE api_url = ? AND name IS NOT NULL AND TRIM(name) != ''
+       ORDER BY sort_order ASC NULLS LAST, added_at ASC
+       LIMIT 1`
+    ).bind(apiUrl).first();
+    return row?.name ? row.name.trim() : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function clearMonitoringSettingsCache() {
+  configCache.clearKey('monitoring_settings');
 }
 
 // 清除VPS间隔缓存（当设置更新时调用）
@@ -950,7 +999,9 @@ const D1_SCHEMAS = {
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('custom_background_enabled', 'false');
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('custom_background_url', '');
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('page_opacity', '80');
-    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_check_interval', '1');`,
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_check_interval', '1');
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('website_high_latency_ms', '3000');
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_high_latency_ms', '20000');`,
 
   monitored_llm_endpoints: `
     CREATE TABLE IF NOT EXISTS monitored_llm_endpoints (
@@ -1035,6 +1086,15 @@ async function applySchemaAlterations(db) {
     ).bind(DEFAULT_LLM_TIMEOUT_MS).run();
   } catch (e) {
     // 静默处理（表可能尚未创建）
+  }
+
+  try {
+    await db.batch([
+      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('website_high_latency_ms', String(WEBSITE_HIGH_LATENCY_MS)),
+      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_high_latency_ms', String(LLM_HIGH_LATENCY_MS))
+    ]);
+  } catch (e) {
+    // 静默处理（app_config 表可能尚未创建）
   }
 }
 
@@ -2556,7 +2616,7 @@ async function handleApiRequest(request, env, ctx) {
 
     try {
       const { results } = await env.DB.prepare(`
-        SELECT id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms,
+        SELECT id, name, api_url, api_key, model, check_prompt, expected_contains, timeout_ms,
                added_at, last_checked, last_status, last_status_code, last_response_time_ms,
                last_output_preview, sort_order, last_notified_down_at, is_public, enable_notifications
         FROM monitored_llm_endpoints
@@ -2622,7 +2682,7 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const { api_url, api_key, model, models, check_prompt, expected_contains, timeout_ms } = await parseJsonSafely(request);
+      const { name, api_url, api_key, model, models, check_prompt, expected_contains, timeout_ms } = await parseJsonSafely(request);
 
       if (!api_url || !isValidHttpUrl(api_url)) {
         return new Response(JSON.stringify({ error: 'Valid API URL is required', message: '请输入有效的API URL' }), {
@@ -2640,8 +2700,10 @@ async function handleApiRequest(request, env, ctx) {
       const addedAt = Math.floor(Date.now() / 1000);
       const checkPrompt = check_prompt || 'Say hello in one word';
       const expectedContains = expected_contains || '';
-      const timeoutMs = normalizeLlmTimeout(timeout_ms);
+      const { llmHighLatencyMs } = await getMonitoringThresholds(env.DB);
+      const timeoutMs = normalizeLlmTimeout(timeout_ms, llmHighLatencyMs);
       const apiKey = api_key || '';
+      const providerName = (typeof name === 'string' ? name.trim() : '') || await getExistingProviderName(env.DB, api_url);
 
       // 获取当前最大 sort_order
       const maxOrderResult = await env.DB.prepare(
@@ -2657,12 +2719,12 @@ async function handleApiRequest(request, env, ctx) {
         const endpointId = Math.random().toString(36).substring(2, 12);
         insertStmts.push(
           env.DB.prepare(`
-            INSERT INTO monitored_llm_endpoints (id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `).bind(endpointId, api_url, apiKey, mdl, checkPrompt, expectedContains, timeoutMs, addedAt, 'PENDING', nextSortOrder)
+            INSERT INTO monitored_llm_endpoints (id, name, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(endpointId, providerName, api_url, apiKey, mdl, checkPrompt, expectedContains, timeoutMs, addedAt, 'PENDING', nextSortOrder)
         );
         newEndpoints.push({
-          id: endpointId, api_url, api_key: apiKey,
+          id: endpointId, name: providerName, api_url, api_key: apiKey,
           model: mdl, check_prompt: checkPrompt,
           expected_contains: expectedContains,
           timeout_ms: timeoutMs,
@@ -2760,29 +2822,31 @@ async function handleApiRequest(request, env, ctx) {
       const addedAt = Math.floor(Date.now() / 1000);
       const insertStmts = [];
       const newEndpoints = [];
+      const { llmHighLatencyMs } = await getMonitoringThresholds(env.DB);
 
       for (const ep of endpoints) {
         const endpointId = Math.random().toString(36).substring(2, 12);
+        const providerName = (typeof ep.name === 'string' ? ep.name.trim() : '') || await getExistingProviderName(env.DB, ep.api_url);
         const apiUrl = ep.api_url;
         const apiKey = ep.api_key || '';
         const model = ep.model.trim();
         const checkPrompt = ep.check_prompt || 'Say hello in one word';
         const expectedContains = ep.expected_contains || '';
-        const timeoutMs = normalizeLlmTimeout(ep.timeout_ms);
+        const timeoutMs = normalizeLlmTimeout(ep.timeout_ms, llmHighLatencyMs);
 
         insertStmts.push(
           env.DB.prepare(`
-            INSERT INTO monitored_llm_endpoints (id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO monitored_llm_endpoints (id, name, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).bind(
-            endpointId, apiUrl, apiKey, model,
+            endpointId, providerName, apiUrl, apiKey, model,
             checkPrompt, expectedContains,
             timeoutMs, addedAt, 'PENDING', nextSortOrder
           )
         );
 
         newEndpoints.push({
-          id: endpointId, api_url: apiUrl, api_key: apiKey,
+          id: endpointId, name: providerName, api_url: apiUrl, api_key: apiKey,
           model, check_prompt: checkPrompt,
           expected_contains: expectedContains,
           timeout_ms: timeoutMs,
@@ -2843,7 +2907,8 @@ async function handleApiRequest(request, env, ctx) {
         return createErrorResponse('Invalid request', '端点ID数组无效', 400, corsHeaders);
       }
 
-      const updateStmts = endpointIds.map((id, index) =>
+      const dedupedEndpointIds = [...new Set(endpointIds)];
+      const updateStmts = dedupedEndpointIds.map((id, index) =>
         env.DB.prepare('UPDATE monitored_llm_endpoints SET sort_order = ? WHERE id = ?').bind(index, id)
       );
 
@@ -2868,7 +2933,7 @@ async function handleApiRequest(request, env, ctx) {
         return createErrorResponse('Invalid endpoint ID', '无效的端点ID', 400, corsHeaders);
       }
 
-      const { api_url, api_key, model, models, check_prompt, expected_contains, timeout_ms } = await request.json();
+      const { name, api_url, api_key, model, models, check_prompt, expected_contains, timeout_ms } = await request.json();
       if (!api_url || !api_url.trim()) {
         return createErrorResponse('Invalid API URL', 'API URL不能为空', 400, corsHeaders);
       }
@@ -2882,16 +2947,22 @@ async function handleApiRequest(request, env, ctx) {
       const apiKey = api_key || '';
       const checkPrompt = check_prompt || 'Say hello in one word';
       const expectedContains = expected_contains || '';
-      const timeoutMs = normalizeLlmTimeout(timeout_ms);
+      const { llmHighLatencyMs } = await getMonitoringThresholds(env.DB);
+      const timeoutMs = normalizeLlmTimeout(timeout_ms, llmHighLatencyMs);
+      const providerName = (typeof name === 'string' ? name.trim() : '') || await getExistingProviderName(env.DB, apiUrl);
 
       // 第一个模型：更新当前端点
       const info = await env.DB.prepare(`
-        UPDATE monitored_llm_endpoints SET api_url = ?, api_key = ?, model = ?, check_prompt = ?, expected_contains = ?, timeout_ms = ? WHERE id = ?
+        UPDATE monitored_llm_endpoints SET name = ?, api_url = ?, api_key = ?, model = ?, check_prompt = ?, expected_contains = ?, timeout_ms = ? WHERE id = ?
       `).bind(
-        apiUrl, apiKey, modelList[0],
+        providerName, apiUrl, apiKey, modelList[0],
         checkPrompt, expectedContains,
         timeoutMs, endpointId
       ).run();
+
+      await env.DB.prepare(
+        'UPDATE monitored_llm_endpoints SET name = ? WHERE api_url = ?'
+      ).bind(providerName, apiUrl).run();
 
       if (info.changes === 0) {
         return createErrorResponse('Endpoint not found', '端点不存在', 404, corsHeaders);
@@ -2913,12 +2984,12 @@ async function handleApiRequest(request, env, ctx) {
           const newId = Math.random().toString(36).substring(2, 12);
           insertStmts.push(
             env.DB.prepare(`
-              INSERT INTO monitored_llm_endpoints (id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).bind(newId, apiUrl, apiKey, modelList[i], checkPrompt, expectedContains, timeoutMs, addedAt, 'PENDING', nextSortOrder)
+              INSERT INTO monitored_llm_endpoints (id, name, api_url, api_key, model, check_prompt, expected_contains, timeout_ms, added_at, last_status, sort_order)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).bind(newId, providerName, apiUrl, apiKey, modelList[i], checkPrompt, expectedContains, timeoutMs, addedAt, 'PENDING', nextSortOrder)
           );
           createdEndpoints.push({
-            id: newId, api_url: apiUrl, api_key: apiKey,
+            id: newId, name: providerName, api_url: apiUrl, api_key: apiKey,
             model: modelList[i], check_prompt: checkPrompt,
             expected_contains: expectedContains,
             timeout_ms: timeoutMs,
@@ -3091,7 +3162,7 @@ async function handleApiRequest(request, env, ctx) {
       const isAdmin = user !== null;
 
       let query = `
-        SELECT id, api_url, model, last_checked, last_status, last_status_code,
+        SELECT id, name, api_url, model, last_checked, last_status, last_status_code,
                last_response_time_ms, last_output_preview
         FROM monitored_llm_endpoints
       `;
@@ -3236,6 +3307,71 @@ async function handleApiRequest(request, env, ctx) {
       return new Response(JSON.stringify({ success: true, interval }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
+    } catch (error) {
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // 获取高延迟阈值设置（管理员）
+  if (path === '/api/admin/settings/high-latency-thresholds' && method === 'GET') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const thresholds = await getMonitoringThresholds(env.DB);
+      return new Response(JSON.stringify(thresholds), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({
+        websiteHighLatencyMs: WEBSITE_HIGH_LATENCY_MS,
+        llmHighLatencyMs: LLM_HIGH_LATENCY_MS
+      }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+  // 设置高延迟阈值（管理员）
+  if (path === '/api/admin/settings/high-latency-thresholds' && method === 'POST') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const { websiteHighLatencyMs, llmHighLatencyMs } = await parseJsonSafely(request);
+      const websiteThreshold = parsePositiveInteger(websiteHighLatencyMs, 0);
+      const llmThreshold = parsePositiveInteger(llmHighLatencyMs, 0);
+
+      if (!websiteThreshold || !llmThreshold) {
+        return createErrorResponse('Invalid threshold', '阈值必须为大于 0 的整数', 400, corsHeaders);
+      }
+      if (websiteThreshold >= WEBSITE_CHECK_TIMEOUT_MS) {
+        return createErrorResponse('Invalid threshold', `网站高延迟阈值必须小于 ${WEBSITE_CHECK_TIMEOUT_MS} ms`, 400, corsHeaders);
+      }
+      if (llmThreshold >= MAX_LLM_TIMEOUT_MS) {
+        return createErrorResponse('Invalid threshold', `LLM 高延迟阈值必须小于 ${MAX_LLM_TIMEOUT_MS} ms`, 400, corsHeaders);
+      }
+
+      const effectiveMinTimeout = getEffectiveMinLlmTimeout(llmThreshold);
+      await env.DB.batch([
+        env.DB.prepare('REPLACE INTO app_config (key, value) VALUES (?, ?)').bind('website_high_latency_ms', String(websiteThreshold)),
+        env.DB.prepare('REPLACE INTO app_config (key, value) VALUES (?, ?)').bind('llm_high_latency_ms', String(llmThreshold)),
+        env.DB.prepare(
+          'UPDATE monitored_llm_endpoints SET timeout_ms = ? WHERE timeout_ms IS NULL OR timeout_ms < ?'
+        ).bind(effectiveMinTimeout, effectiveMinTimeout)
+      ]);
+
+      clearMonitoringSettingsCache();
+
+      return createSuccessResponse({
+        websiteHighLatencyMs: websiteThreshold,
+        llmHighLatencyMs: llmThreshold,
+        effectiveMinLlmTimeoutMs: effectiveMinTimeout
+      }, corsHeaders);
     } catch (error) {
       return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
     }
@@ -3560,6 +3696,7 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
   let newStatus = 'PENDING';
   let newStatusCode = null;
   let newResponseTime = null;
+  const { websiteHighLatencyMs } = await getMonitoringThresholds(db);
 
   // 获取当前状态
   let previousStatus = 'PENDING';
@@ -3593,7 +3730,7 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
 
     if (response.ok || (response.status >= 300 && response.status < 500)) {
       // 可用：响应过慢则单独标记为 HIGH_LATENCY，仅展示不触发故障通知
-      newStatus = newResponseTime > WEBSITE_HIGH_LATENCY_MS ? 'HIGH_LATENCY' : 'UP';
+      newStatus = newResponseTime > websiteHighLatencyMs ? 'HIGH_LATENCY' : 'UP';
     } else {
       newStatus = 'DOWN';
     }
@@ -3646,14 +3783,14 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
 // ==================== LLM端点健康检查 ====================
 
 async function checkLlmEndpointStatus(endpoint, db, ctx) {
-  const { id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms } = endpoint;
+  const { id, name, api_url, api_key, model, check_prompt, expected_contains, timeout_ms } = endpoint;
   const startTime = Date.now();
   let newStatus = 'PENDING';
   let newStatusCode = null;
   let newResponseTime = null;
   let outputPreview = null;
 
-  const name = model;
+  const displayName = name || model;
 
   // 获取当前状态和通知设置
   let previousStatus = 'PENDING';
@@ -3675,7 +3812,8 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
   }
 
   const NOTIFICATION_INTERVAL_SECONDS = 1 * 60 * 60; // 1小时
-  const effectiveTimeout = normalizeLlmTimeout(timeout_ms);
+  const { llmHighLatencyMs } = await getMonitoringThresholds(db);
+  const effectiveTimeout = normalizeLlmTimeout(timeout_ms, llmHighLatencyMs);
 
   try {
     const headers = { 'Content-Type': 'application/json' };
@@ -3720,9 +3858,9 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
             const contentLower = content.toLowerCase();
             const matched = patterns.some(p => contentLower.includes(p));
             // 可用：响应过慢则单独标记为 HIGH_LATENCY，仅展示不触发故障通知
-            newStatus = matched ? (newResponseTime > LLM_HIGH_LATENCY_MS ? 'HIGH_LATENCY' : 'UP') : 'DOWN';
+            newStatus = matched ? (newResponseTime > llmHighLatencyMs ? 'HIGH_LATENCY' : 'UP') : 'DOWN';
           } else {
-            newStatus = newResponseTime > LLM_HIGH_LATENCY_MS ? 'HIGH_LATENCY' : 'UP';
+            newStatus = newResponseTime > llmHighLatencyMs ? 'HIGH_LATENCY' : 'UP';
           }
         } else {
           // API 返回 200 但无有效内容
@@ -3759,7 +3897,7 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
     const isFirstTimeDown = !['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus);
     if (isFirstTimeDown) {
       if (enableNotifications) {
-        const message = `🔴 LLM端点故障: *${name}* 当前状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
+        const message = `🔴 LLM端点故障: *${displayName}* 当前状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
         ctx.waitUntil(sendNotifications(db, message));
       }
       newLastNotifiedDownAt = checkTime;
@@ -3767,7 +3905,7 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
       const shouldResend = lastNotifiedDownAt === null || (checkTime - lastNotifiedDownAt > NOTIFICATION_INTERVAL_SECONDS);
       if (shouldResend) {
         if (enableNotifications) {
-          const message = `🔴 LLM端点持续故障: *${name}* 状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
+          const message = `🔴 LLM端点持续故障: *${displayName}* 状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
           ctx.waitUntil(sendNotifications(db, message));
         }
         newLastNotifiedDownAt = checkTime;
@@ -3775,7 +3913,7 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
     }
   } else if ((newStatus === 'UP' || newStatus === 'HIGH_LATENCY') && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
     if (enableNotifications) {
-      const message = `✅ LLM端点恢复: *${name}* 已恢复在线!\n模型: ${model}\nURL: ${api_url}`;
+      const message = `✅ LLM端点恢复: *${displayName}* 已恢复在线!\n模型: ${model}\nURL: ${api_url}`;
       ctx.waitUntil(sendNotifications(db, message));
     }
     newLastNotifiedDownAt = null;
@@ -4019,7 +4157,7 @@ export default {
 
             if (taskCounter % llmCheckInterval === 0) {
               const { results: llmEndpoints } = await env.DB.prepare(
-                'SELECT id, api_url, api_key, model, check_prompt, expected_contains, timeout_ms FROM monitored_llm_endpoints'
+                'SELECT id, name, api_url, api_key, model, check_prompt, expected_contains, timeout_ms FROM monitored_llm_endpoints'
               ).all();
 
               if (llmEndpoints?.length > 0) {
@@ -4439,7 +4577,24 @@ function getIndexHtml() {
         .history-bar-up { background-color: #28a745; } /* Green */
         .history-bar-down { background-color: #dc3545; } /* Red */
         .history-bar-pending { background-color: #6c757d; } /* Gray */
-        .history-bar-high-latency { background-color: #fd7e14; } /* Orange - 高延迟 */
+        .history-bar-high-latency { background-color: #f6b26b; } /* Light orange - 高延迟 */
+        .provider-group-row > td {
+            background-color: #eef4ff !important;
+            border-top: 1px solid #d7e3ff;
+            border-bottom: 1px solid #d7e3ff;
+            padding-top: 0.75rem;
+            padding-bottom: 0.75rem;
+        }
+        .provider-group-row .btn-link {
+            font-weight: 600;
+            color: inherit;
+        }
+        .provider-group-row .btn-link:hover {
+            color: inherit;
+        }
+        .provider-child-row > td:first-child {
+            padding-left: 1.75rem;
+        }
 
         /* Default styling for progress bar text (light mode) */
         .progress span {
@@ -4839,7 +4994,7 @@ function getIndexHtml() {
                         <table class="table table-striped table-hover align-middle">
                             <thead>
                                 <tr>
-                                    <th>模型</th>
+                                    <th>Provider / 模型</th>
                                     <th>状态</th>
                                     <th>状态码</th>
                                     <th>响应时间 (ms)</th>
@@ -4970,7 +5125,24 @@ function getLoginHtml() {
         .history-bar-up { background-color: #28a745; } /* Green */
         .history-bar-down { background-color: #dc3545; } /* Red */
         .history-bar-pending { background-color: #6c757d; } /* Gray */
-        .history-bar-high-latency { background-color: #fd7e14; } /* Orange - 高延迟 */
+        .history-bar-high-latency { background-color: #f6b26b; } /* Light orange - 高延迟 */
+        .provider-group-row > td {
+            background-color: #eef4ff !important;
+            border-top: 1px solid #d7e3ff;
+            border-bottom: 1px solid #d7e3ff;
+            padding-top: 0.75rem;
+            padding-bottom: 0.75rem;
+        }
+        .provider-group-row .btn-link {
+            font-weight: 600;
+            color: inherit;
+        }
+        .provider-group-row .btn-link:hover {
+            color: inherit;
+        }
+        .provider-child-row > td:first-child {
+            padding-left: 1.75rem;
+        }
 
         /* Default styling for progress bar text (light mode) */
         .progress span {
@@ -5447,6 +5619,24 @@ function getAdminHtml() {
                                     <small class="text-muted">1=每次Cron都检查，2=隔一次，3=每三次...</small>
                                 </div>
                             </form>
+                            <form id="highLatencyThresholdForm" class="admin-settings-form me-2">
+                                <div class="settings-group">
+                                    <label class="form-label mb-0">高延迟阈值:</label>
+                                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                                        <div class="input-group input-group-sm" style="width: 170px;">
+                                            <span class="input-group-text">网站</span>
+                                            <input type="number" class="form-control" id="websiteHighLatencyMs" min="1" max="14999" placeholder="3000">
+                                            <span class="input-group-text">ms</span>
+                                        </div>
+                                        <div class="input-group input-group-sm" style="width: 170px;">
+                                            <span class="input-group-text">LLM</span>
+                                            <input type="number" class="form-control" id="llmHighLatencyMs" min="1" max="119000" placeholder="20000">
+                                            <span class="input-group-text">ms</span>
+                                        </div>
+                                        <button type="button" id="saveHighLatencyThresholdsBtn" class="btn btn-outline-warning btn-sm">保存阈值</button>
+                                    </div>
+                                </div>
+                            </form>
                             <div class="admin-actions-group desktop-only">
                                 <button id="addLlmEndpointBtn" class="btn btn-success">
                                     <i class="bi bi-plus-circle"></i> 添加LLM端点
@@ -5461,7 +5651,7 @@ function getAdminHtml() {
                             <thead>
                                 <tr>
                                     <th style="width:30px"></th>
-                                    <th>模型</th>
+                                    <th>Provider / 模型</th>
                                     <th>API URL</th>
                                     <th>状态</th>
                                     <th>状态码</th>
@@ -5474,7 +5664,7 @@ function getAdminHtml() {
                             </thead>
                             <tbody id="llmEndpointTableBody">
                                 <tr>
-                                    <td colspan="9" class="text-center">加载中...</td>
+                                    <td colspan="10" class="text-center">加载中...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -5732,6 +5922,11 @@ function getAdminHtml() {
                     <form id="llmEndpointForm">
                         <input type="hidden" id="llmEndpointId">
                         <div class="mb-3">
+                            <label for="llmEndpointProviderName" class="form-label">Provider 名称（可选）</label>
+                            <input type="text" class="form-control" id="llmEndpointProviderName" placeholder="例如：OpenAI 官方 / 自建网关 / SiliconFlow">
+                            <div class="form-text">同一个 API URL 下的所有模型会共用这个 Provider 名称；不填写时将自动根据 URL 生成。</div>
+                        </div>
+                        <div class="mb-3">
                             <label for="llmEndpointModel" class="form-label">模型名称 *</label>
                             <textarea class="form-control" id="llmEndpointModel" rows="3" placeholder="支持多个模型：每行一个、逗号分隔或 JSON 数组均可&#10;例如：gpt-4o-mini, deepseek-chat, claude-sonnet-4-5-20250929" required></textarea>
                             <div class="form-text">支持多个模型：每行一个、逗号分隔或 JSON 数组如 <code>["model-a","model-b"]</code>。同一个 API URL/Key/Prompt/Timeout 会应用到所有模型。</div>
@@ -5757,7 +5952,7 @@ function getAdminHtml() {
                         <div class="mb-3">
                             <label for="llmEndpointTimeout" class="form-label">超时时间 (ms)</label>
                             <input type="number" class="form-control" id="llmEndpointTimeout" value="45000" min="21000" max="120000">
-                            <div class="form-text">超时时间必须大于高延迟阈值（20秒），建议至少 21 秒。超过 20 秒响应成功会标记为"高延迟"状态（仅展示）。</div>
+                            <div class="form-text" id="llmEndpointTimeoutHelp">超时时间必须大于当前 LLM 高延迟阈值，建议至少高 1 秒。超过该阈值但请求成功时会标记为“高延迟”状态（仅展示）。</div>
                         </div>
                     </form>
                 </div>
@@ -7405,6 +7600,7 @@ let vpsUpdateInterval = null;
 let siteUpdateInterval = null;
 let serverDataCache = {}; // Cache server data to avoid re-fetching for details
 let vpsStatusCache = {}; // 用于跟踪VPS状态变化
+const llmProviderExpansionState = {};
 const DEFAULT_VPS_REFRESH_INTERVAL_MS = 60000; // Default to 60 seconds for VPS data if backend setting fails
 const DEFAULT_SITE_REFRESH_INTERVAL_MS = 60000; // Default to 60 seconds for Site data
 
@@ -7553,6 +7749,84 @@ function showSuccess(message, containerId = null) {
             container.innerHTML = \`<div class="alert alert-success">\${message}</div>\`;
         }
     }
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getProviderFallbackName(apiUrl) {
+    if (!apiUrl) return '未命名 Provider';
+    try {
+        const parsed = new URL(apiUrl);
+        return parsed.hostname.replace(/^www\./, '') || apiUrl;
+    } catch (error) {
+        return apiUrl;
+    }
+}
+
+function groupLlmEndpointsByProvider(endpoints) {
+    const groups = [];
+    const groupMap = new Map();
+
+    endpoints.forEach((endpoint) => {
+        const key = endpoint.api_url || endpoint.id;
+        let group = groupMap.get(key);
+        if (!group) {
+            group = {
+                key,
+                api_url: endpoint.api_url,
+                providerName: (endpoint.name || '').trim(),
+                endpoints: []
+            };
+            groupMap.set(key, group);
+            groups.push(group);
+        } else if (endpoint.name && endpoint.name.trim()) {
+            group.providerName = endpoint.name.trim();
+        }
+
+        group.endpoints.push(endpoint);
+    });
+
+    groups.forEach((group) => {
+        if (!group.providerName) {
+            group.providerName = getProviderFallbackName(group.api_url);
+        }
+        if (typeof llmProviderExpansionState[group.key] === 'undefined') {
+            llmProviderExpansionState[group.key] = true;
+        }
+    });
+
+    return groups;
+}
+
+function getProviderStatusInfo(group) {
+    const statuses = group.endpoints.map(ep => ep.last_status);
+    if (statuses.some(status => ['DOWN', 'ERROR'].includes(status))) return getSiteStatusBadge('DOWN');
+    if (statuses.includes('TIMEOUT')) return getSiteStatusBadge('TIMEOUT');
+    if (statuses.includes('HIGH_LATENCY')) return getSiteStatusBadge('HIGH_LATENCY');
+    if (statuses.includes('UP')) return getSiteStatusBadge('UP');
+    return getSiteStatusBadge('PENDING');
+}
+
+function getProviderHeaderMeta(group) {
+    const hostName = getProviderFallbackName(group.api_url);
+    const customName = (group.providerName || '').trim();
+    const childModels = new Set(group.endpoints.map(ep => (ep.model || '').trim()).filter(Boolean));
+    const conflictsWithModel = customName && childModels.has(customName);
+
+    return {
+        title: customName && !conflictsWithModel ? customName : hostName,
+        subtitle: customName && customName !== hostName
+            ? (conflictsWithModel ? '别名: ' + customName : hostName)
+            : (group.api_url || '-'),
+        endpointText: group.api_url || '-'
+    };
 }
 
 // Function to fetch VPS refresh interval and start periodic VPS data updates
@@ -8430,13 +8704,13 @@ async function loadAllLlmEndpointStatuses() {
         if (endpoints.length === 0) {
             if (noLlmAlert) noLlmAlert.classList.remove('d-none');
             llmStatusTableBody.innerHTML = '<tr><td colspan="7" class="text-center">暂无LLM端点监控数据。</td></tr>';
-            renderMobileLlmCards([]);
+            renderGroupedMobileLlmCards([]);
             return;
         } else {
             if (noLlmAlert) noLlmAlert.classList.add('d-none');
         }
 
-        renderLlmStatusTable(endpoints);
+        renderGroupedLlmStatusTable(endpoints);
     } catch (error) {
         const llmStatusTableBody = document.getElementById('llmStatusTableBody');
         if (llmStatusTableBody) {
@@ -8528,6 +8802,150 @@ function renderMobileLlmCards(endpoints) {
         card.appendChild(cardBody);
         container.appendChild(card);
     }
+}
+
+async function renderGroupedLlmStatusTable(endpoints) {
+    const tableBody = document.getElementById('llmStatusTableBody');
+    if (!tableBody) return;
+
+    tableBody.innerHTML = '';
+    const providerGroups = groupLlmEndpointsByProvider(endpoints);
+
+    providerGroups.forEach(group => {
+        const expanded = llmProviderExpansionState[group.key] !== false;
+        const providerStatus = getProviderStatusInfo(group);
+        const providerHeader = getProviderHeaderMeta(group);
+        const providerRow = document.createElement('tr');
+        providerRow.className = 'provider-group-row';
+        providerRow.innerHTML = \`
+            <td colspan="7">
+                <div class="d-flex justify-content-between align-items-start gap-3">
+                    <div>
+                        <button type="button" class="btn btn-sm btn-link text-decoration-none p-0 public-provider-toggle" data-provider-key="\${escapeHtml(group.key)}">
+                            <i class="bi \${expanded ? 'bi-caret-down-fill' : 'bi-caret-right-fill'} me-1"></i>
+                            <strong>\${escapeHtml(providerHeader.title)}</strong>
+                        </button>
+                        <div><small class="text-muted">\${escapeHtml(providerHeader.subtitle)}</small></div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                        <small class="text-muted">\${group.endpoints.length} 个模型</small>
+                        <span class="badge \${providerStatus.class}">\${providerStatus.text}</span>
+                    </div>
+                </div>
+            </td>
+        \`;
+        tableBody.appendChild(providerRow);
+
+        group.endpoints.forEach(ep => {
+            const row = document.createElement('tr');
+            row.dataset.providerKey = group.key;
+            row.className = 'provider-child-row';
+            row.style.display = expanded ? '' : 'none';
+
+            const statusInfo = getSiteStatusBadge(ep.last_status);
+            const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
+            const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
+            const outputPreview = ep.last_output_preview
+                ? (ep.last_output_preview.length > 60 ? ep.last_output_preview.substring(0, 60) + '...' : ep.last_output_preview)
+                : '-';
+
+            const historyCell = document.createElement('td');
+            const historyContainer = document.createElement('div');
+            historyContainer.className = 'history-bar-container';
+            historyCell.appendChild(historyContainer);
+
+            row.innerHTML = \`
+                <td><span class="ms-3 badge bg-info-subtle text-dark border">\${escapeHtml(ep.model)}</span></td>
+                <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
+                <td>\${ep.last_status_code || '-'}</td>
+                <td>\${responseTime}</td>
+                <td>\${lastCheckTime}</td>
+                <td><small class="text-muted" title="\${escapeHtml(ep.last_output_preview || '')}">\${escapeHtml(outputPreview)}</small></td>
+            \`;
+            row.appendChild(historyCell);
+            tableBody.appendChild(row);
+            renderSiteHistoryBar(historyContainer, ep.history || []);
+        });
+    });
+
+    tableBody.querySelectorAll('.public-provider-toggle').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const providerKey = this.getAttribute('data-provider-key');
+            llmProviderExpansionState[providerKey] = !(llmProviderExpansionState[providerKey] !== false);
+            renderGroupedLlmStatusTable(endpoints);
+            renderGroupedMobileLlmCards(endpoints);
+        });
+    });
+
+    renderGroupedMobileLlmCards(endpoints);
+}
+
+function renderGroupedMobileLlmCards(endpoints) {
+    const container = document.getElementById('mobileLlmContainer');
+    if (!container) return;
+
+    if (!endpoints || endpoints.length === 0) {
+        container.innerHTML = '<div class="text-center p-3 text-muted">暂无LLM端点监控数据。</div>';
+        return;
+    }
+
+    container.innerHTML = '';
+    const providerGroups = groupLlmEndpointsByProvider(endpoints);
+
+    providerGroups.forEach(group => {
+        const expanded = llmProviderExpansionState[group.key] !== false;
+        const providerStatus = getProviderStatusInfo(group);
+        const providerHeader = getProviderHeaderMeta(group);
+        const card = document.createElement('div');
+        card.className = 'card mb-2';
+
+        const cardBody = document.createElement('div');
+        cardBody.className = 'card-body p-2';
+        cardBody.innerHTML = \`
+            <div class="d-flex justify-content-between align-items-center">
+                <button type="button" class="btn btn-sm btn-link text-decoration-none p-0 public-provider-toggle" data-provider-key="\${escapeHtml(group.key)}">
+                    <i class="bi \${expanded ? 'bi-caret-down-fill' : 'bi-caret-right-fill'} me-1"></i><strong>\${escapeHtml(providerHeader.title)}</strong>
+                </button>
+                <span class="badge \${providerStatus.class}">\${providerStatus.text}</span>
+            </div>
+            <div class="mt-1 mb-2"><small class="text-muted">\${escapeHtml(providerHeader.subtitle)}</small></div>
+        \`;
+
+        group.endpoints.forEach(ep => {
+            const statusInfo = getSiteStatusBadge(ep.last_status);
+            const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
+            const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
+            const item = document.createElement('div');
+            item.dataset.providerKey = group.key;
+            item.style.display = expanded ? '' : 'none';
+            item.className = 'border-top pt-2 mt-2';
+            item.innerHTML = \`
+                <div class="d-flex justify-content-between align-items-center">
+                    <strong>\${escapeHtml(ep.model)}</strong>
+                    <span class="badge \${statusInfo.class}">\${statusInfo.text}</span>
+                </div>
+                <div class="mt-1"><small>响应: \${responseTime} | \${lastCheckTime}</small></div>
+                <div class="mobile-history-container mt-2">
+                    <div class="mobile-history-label">24小时记录</div>
+                    <div class="history-bar-container"></div>
+                </div>
+            \`;
+            cardBody.appendChild(item);
+            renderSiteHistoryBar(item.querySelector('.history-bar-container'), ep.history || []);
+        });
+
+        card.appendChild(cardBody);
+        container.appendChild(card);
+    });
+
+    container.querySelectorAll('.public-provider-toggle').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const providerKey = this.getAttribute('data-provider-key');
+            llmProviderExpansionState[providerKey] = !(llmProviderExpansionState[providerKey] !== false);
+            renderGroupedMobileLlmCards(endpoints);
+            renderGroupedLlmStatusTable(endpoints);
+        });
+    });
 }
 
 // Get website status badge class and text (copied from admin.js for reuse)
@@ -9016,6 +9434,70 @@ async function apiRequest(url, options = {}) {
 // Global variables for VPS data updates
 let vpsUpdateInterval = null;
 const DEFAULT_VPS_REFRESH_INTERVAL_MS = 60000; // Default to 60 seconds for VPS data if backend setting fails
+const llmProviderExpansionState = {};
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getProviderFallbackName(apiUrl) {
+    if (!apiUrl) return '未命名 Provider';
+    try {
+        const parsed = new URL(apiUrl);
+        return parsed.hostname.replace(/^www\./, '') || apiUrl;
+    } catch (error) {
+        return apiUrl;
+    }
+}
+
+function groupLlmEndpointsByProvider(endpoints) {
+    const groups = [];
+    const groupMap = new Map();
+
+    endpoints.forEach((endpoint) => {
+        const key = endpoint.api_url || endpoint.id;
+        let group = groupMap.get(key);
+        if (!group) {
+            group = {
+                key,
+                api_url: endpoint.api_url,
+                providerName: (endpoint.name || '').trim(),
+                endpoints: []
+            };
+            groupMap.set(key, group);
+            groups.push(group);
+        }
+        if (endpoint.name && endpoint.name.trim()) {
+            group.providerName = endpoint.name.trim();
+        }
+        group.endpoints.push(endpoint);
+    });
+
+    groups.forEach((group) => {
+        if (!group.providerName) {
+            group.providerName = getProviderFallbackName(group.api_url);
+        }
+        if (typeof llmProviderExpansionState[group.key] === 'undefined') {
+            llmProviderExpansionState[group.key] = true;
+        }
+    });
+
+    return groups;
+}
+
+function getProviderStatusInfo(group) {
+    const statuses = group.endpoints.map(ep => ep.last_status);
+    if (statuses.some(status => ['DOWN', 'ERROR'].includes(status))) return getSiteStatusBadge('DOWN');
+    if (statuses.includes('TIMEOUT')) return getSiteStatusBadge('TIMEOUT');
+    if (statuses.includes('HIGH_LATENCY')) return getSiteStatusBadge('HIGH_LATENCY');
+    if (statuses.includes('UP')) return getSiteStatusBadge('UP');
+    return getSiteStatusBadge('PENDING');
+}
 
 // Function to fetch VPS refresh interval and start periodic VPS data updates
 async function initializeVpsDataUpdates() {
@@ -9318,8 +9800,13 @@ function initEventListeners() {
         saveLlmCheckInterval();
     });
 
+    document.getElementById('saveHighLatencyThresholdsBtn').addEventListener('click', function() {
+        saveHighLatencyThresholds();
+    });
+
     // 加载LLM检查频率设置
     loadLlmCheckInterval();
+    loadHighLatencyThresholds();
 
     // 保存Telegram设置按钮
     document.getElementById('saveTelegramSettingsBtn').addEventListener('click', function() {
@@ -10542,8 +11029,8 @@ async function loadLlmEndpointList() {
     try {
         const data = await apiRequest('/api/admin/llm-endpoints');
         llmEndpointList = data.endpoints || [];
-        renderLlmEndpointTable(llmEndpointList);
-        renderMobileAdminLlmCards(llmEndpointList);
+        renderGroupedAdminLlmTable(llmEndpointList);
+        renderGroupedMobileAdminLlmCards(llmEndpointList);
     } catch (error) {
         showToast('danger', '加载LLM端点列表失败: ' + error.message);
     }
@@ -10789,6 +11276,7 @@ function showLlmEndpointModal(endpointIdToEdit = null) {
         if (ep) {
             modalTitle.textContent = '编辑LLM端点';
             endpointIdInput.value = ep.id;
+            document.getElementById('llmEndpointProviderName').value = ep.name || '';
             document.getElementById('llmEndpointUrl').value = ep.api_url;
             document.getElementById('llmEndpointApiKey').value = ep.api_key || '';
             document.getElementById('llmEndpointModel').value = ep.model;
@@ -10803,6 +11291,8 @@ function showLlmEndpointModal(endpointIdToEdit = null) {
         modalTitle.textContent = '添加LLM端点';
         endpointIdInput.value = '';
     }
+
+    updateLlmTimeoutHelp();
 
     const modal = new bootstrap.Modal(document.getElementById('llmEndpointModal'));
     modal.show();
@@ -10838,6 +11328,7 @@ function parseLlmModelInput(input) {
 // 保存LLM端点（添加或更新）
 async function saveLlmEndpoint() {
     const endpointId = document.getElementById('llmEndpointId').value;
+    const name = document.getElementById('llmEndpointProviderName').value.trim();
     const api_url = document.getElementById('llmEndpointUrl').value.trim();
     const api_key = document.getElementById('llmEndpointApiKey').value.trim();
     const modelInput = document.getElementById('llmEndpointModel').value;
@@ -10860,7 +11351,15 @@ async function saveLlmEndpoint() {
         return;
     }
 
+    const llmThreshold = parseInt(document.getElementById('llmHighLatencyMs')?.value || '20000', 10) || 20000;
+    const minTimeout = Math.max(21000, llmThreshold + 1000);
+    if (timeout_ms < minTimeout || timeout_ms > 120000) {
+        showToast('warning', '超时时间必须在 ' + minTimeout + ' 到 120000 ms 之间');
+        return;
+    }
+
     const requestBody = {
+        name,
         api_url, api_key,
         model: models[0],
         models,
@@ -10959,6 +11458,74 @@ async function saveLlmCheckInterval() {
         showToast('success', 'LLM探测频率已设为每 ' + interval + ' 次Cron执行检查一次');
     } catch (error) {
         showToast('danger', '保存失败: ' + error.message);
+    }
+}
+
+async function loadHighLatencyThresholds() {
+    try {
+        const data = await apiRequest('/api/admin/settings/high-latency-thresholds');
+        const websiteInput = document.getElementById('websiteHighLatencyMs');
+        const llmInput = document.getElementById('llmHighLatencyMs');
+
+        if (websiteInput && data?.websiteHighLatencyMs) {
+            websiteInput.value = data.websiteHighLatencyMs;
+        }
+        if (llmInput && data?.llmHighLatencyMs) {
+            llmInput.value = data.llmHighLatencyMs;
+        }
+
+        updateLlmTimeoutHelp(data?.llmHighLatencyMs);
+    } catch (error) {
+        updateLlmTimeoutHelp();
+    }
+}
+
+function updateLlmTimeoutHelp(llmThresholdMs) {
+    const llmInput = document.getElementById('llmHighLatencyMs');
+    const timeoutInput = document.getElementById('llmEndpointTimeout');
+    const timeoutHelp = document.getElementById('llmEndpointTimeoutHelp');
+    const threshold = parseInt(llmThresholdMs || llmInput?.value || '20000', 10) || 20000;
+    const minTimeout = Math.max(21000, threshold + 1000);
+
+    if (timeoutInput) {
+        timeoutInput.min = String(minTimeout);
+        if (!timeoutInput.value || parseInt(timeoutInput.value, 10) < minTimeout) {
+            timeoutInput.value = String(Math.max(45000, minTimeout));
+        }
+    }
+
+    if (timeoutHelp) {
+        timeoutHelp.textContent = '超时时间必须大于当前 LLM 高延迟阈值（' + threshold + ' ms），建议至少高 1000 ms。超过该阈值但请求成功时会标记为“高延迟”状态（仅展示）。';
+    }
+}
+
+async function saveHighLatencyThresholds() {
+    const websiteHighLatencyMs = parseInt(document.getElementById('websiteHighLatencyMs').value, 10);
+    const llmHighLatencyMs = parseInt(document.getElementById('llmHighLatencyMs').value, 10);
+
+    if (!websiteHighLatencyMs || !llmHighLatencyMs || websiteHighLatencyMs < 1 || llmHighLatencyMs < 1) {
+        showToast('warning', '请输入大于 0 的整数阈值');
+        return;
+    }
+    if (websiteHighLatencyMs >= 15000) {
+        showToast('warning', '网站高延迟阈值必须小于 15000 ms');
+        return;
+    }
+    if (llmHighLatencyMs >= 120000) {
+        showToast('warning', 'LLM 高延迟阈值必须小于 120000 ms');
+        return;
+    }
+
+    try {
+        const result = await apiRequest('/api/admin/settings/high-latency-thresholds', {
+            method: 'POST',
+            body: JSON.stringify({ websiteHighLatencyMs, llmHighLatencyMs })
+        });
+
+        updateLlmTimeoutHelp(result?.llmHighLatencyMs || llmHighLatencyMs);
+        showToast('success', '高延迟阈值已更新');
+    } catch (error) {
+        showToast('danger', '保存高延迟阈值失败: ' + error.message);
     }
 }
 
@@ -11764,6 +12331,224 @@ function renderMobileAdminLlmCards(endpoints) {
     });
 
     mobileContainer.querySelectorAll('.llm-notification-toggle').forEach(toggle => {
+        toggle.addEventListener('change', async function() {
+            const endpointId = this.getAttribute('data-llm-id');
+            const enableNotifications = this.checked;
+            try {
+                await apiRequest(\`/api/admin/llm-endpoints/\${endpointId}/notifications\`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ enable_notifications: enableNotifications })
+                });
+                showToast('success', '通知设置更新成功');
+            } catch (error) {
+                this.checked = !this.checked;
+                showToast('danger', '更新通知设置失败: ' + error.message);
+            }
+        });
+    });
+}
+
+function renderGroupedAdminLlmTable(endpoints) {
+    const tableBody = document.getElementById('llmEndpointTableBody');
+    if (!tableBody) return;
+
+    tableBody.innerHTML = '';
+
+    if (endpoints.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="10" class="text-center">暂无LLM端点</td></tr>';
+        return;
+    }
+
+    const providerGroups = groupLlmEndpointsByProvider(endpoints);
+    providerGroups.forEach((group) => {
+        const expanded = llmProviderExpansionState[group.key] !== false;
+        const providerStatus = getProviderStatusInfo(group);
+        const providerHeader = getProviderHeaderMeta(group);
+        const groupRow = document.createElement('tr');
+        groupRow.className = 'provider-group-row';
+        groupRow.innerHTML = \`
+            <td colspan="10">
+                <div class="d-flex justify-content-between align-items-start gap-3">
+                    <div>
+                        <button type="button" class="btn btn-sm btn-link text-decoration-none p-0 admin-provider-toggle" data-provider-key="\${escapeHtml(group.key)}">
+                            <i class="bi \${expanded ? 'bi-caret-down-fill' : 'bi-caret-right-fill'} me-1"></i>
+                            <strong>\${escapeHtml(providerHeader.title)}</strong>
+                        </button>
+                        <div><small class="text-muted">\${escapeHtml(providerHeader.subtitle)}</small></div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                        <small class="text-muted">\${group.endpoints.length} 个模型</small>
+                        <span class="badge \${providerStatus.class}">\${providerStatus.text}</span>
+                    </div>
+                </div>
+            </td>
+        \`;
+        tableBody.appendChild(groupRow);
+
+        group.endpoints.forEach((ep) => {
+            const row = document.createElement('tr');
+            row.setAttribute('data-llm-id', ep.id);
+            row.dataset.providerKey = group.key;
+            row.classList.add('provider-child-row');
+            row.classList.add('llm-row-draggable');
+            row.draggable = true;
+            row.style.display = expanded ? '' : 'none';
+
+            const statusInfo = getSiteStatusBadge(ep.last_status);
+            const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
+            const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
+
+            row.innerHTML = \`
+                <td><i class="bi bi-grip-vertical text-muted me-2" style="cursor: grab;" title="拖拽排序"></i></td>
+                <td><span class="ms-3 badge bg-info-subtle text-dark border">\${escapeHtml(ep.model)}</span></td>
+                <td><a href="\${escapeHtml(ep.api_url)}" target="_blank" rel="noopener noreferrer" class="text-truncate d-inline-block" style="max-width:200px;">\${escapeHtml(ep.api_url)}</a></td>
+                <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
+                <td>\${ep.last_status_code || '-'}</td>
+                <td>\${responseTime}</td>
+                <td>\${lastCheckTime}</td>
+                <td>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input llm-visibility-toggle" type="checkbox" data-llm-id="\${ep.id}" \${ep.is_public ? 'checked' : ''}>
+                    </div>
+                </td>
+                <td>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input llm-notification-toggle" type="checkbox" data-llm-id="\${ep.id}" \${ep.enable_notifications !== 0 ? 'checked' : ''}>
+                    </div>
+                </td>
+                <td>
+                    <div class="btn-group">
+                        <button class="btn btn-sm btn-outline-primary edit-llm-btn" data-id="\${ep.id}" title="编辑">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger delete-llm-btn" data-id="\${ep.id}" data-name="\${escapeHtml(ep.model)}" title="删除">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                </td>
+            \`;
+            tableBody.appendChild(row);
+        });
+    });
+
+    bindAdminLlmEvents(tableBody);
+    initializeLlmDragSort();
+}
+
+function renderGroupedMobileAdminLlmCards(endpoints) {
+    const mobileContainer = document.getElementById('mobileAdminLlmContainer');
+    if (!mobileContainer) return;
+
+    mobileContainer.innerHTML = '';
+
+    if (!endpoints || endpoints.length === 0) {
+        mobileContainer.innerHTML = '<div class="text-center p-3 text-muted">暂无LLM端点数据</div>';
+        return;
+    }
+
+    const providerGroups = groupLlmEndpointsByProvider(endpoints);
+    providerGroups.forEach(group => {
+        const expanded = llmProviderExpansionState[group.key] !== false;
+        const providerStatus = getProviderStatusInfo(group);
+        const providerHeader = getProviderHeaderMeta(group);
+        const card = document.createElement('div');
+        card.className = 'card mb-2';
+
+        const cardBody = document.createElement('div');
+        cardBody.className = 'card-body p-2';
+        cardBody.innerHTML = \`
+            <div class="d-flex justify-content-between align-items-center">
+                <button type="button" class="btn btn-sm btn-link text-decoration-none p-0 admin-provider-toggle" data-provider-key="\${escapeHtml(group.key)}">
+                    <i class="bi \${expanded ? 'bi-caret-down-fill' : 'bi-caret-right-fill'} me-1"></i><strong>\${escapeHtml(providerHeader.title)}</strong>
+                </button>
+                <span class="badge \${providerStatus.class}">\${providerStatus.text}</span>
+            </div>
+            <div class="mt-1 mb-2"><small class="text-muted">\${escapeHtml(providerHeader.subtitle)}</small></div>
+        \`;
+
+        group.endpoints.forEach(ep => {
+            const statusInfo = getSiteStatusBadge(ep.last_status);
+            const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
+            const responseTime = ep.last_response_time_ms !== null ? \`\${ep.last_response_time_ms} ms\` : '-';
+            const item = document.createElement('div');
+            item.dataset.providerKey = group.key;
+            item.style.display = expanded ? '' : 'none';
+            item.className = 'border-top pt-2 mt-2';
+            item.innerHTML = \`
+                <div class="d-flex justify-content-between align-items-center">
+                    <strong>\${escapeHtml(ep.model)}</strong>
+                    <span class="badge \${statusInfo.class}">\${statusInfo.text}</span>
+                </div>
+                <div class="mt-1"><small>响应: \${responseTime} | \${lastCheckTime}</small></div>
+                <div class="mt-2 d-flex justify-content-between align-items-center">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input llm-visibility-toggle" type="checkbox" data-llm-id="\${ep.id}" \${ep.is_public ? 'checked' : ''}>
+                        <label class="form-check-label ms-1">显示</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input llm-notification-toggle" type="checkbox" data-llm-id="\${ep.id}" \${ep.enable_notifications !== 0 ? 'checked' : ''}>
+                        <label class="form-check-label ms-1">通知</label>
+                    </div>
+                </div>
+                <div class="mt-2 d-flex gap-2">
+                    <button class="btn btn-outline-primary btn-sm flex-fill edit-llm-btn" data-id="\${ep.id}">
+                        <i class="bi bi-pencil"></i> 编辑
+                    </button>
+                    <button class="btn btn-outline-danger btn-sm flex-fill delete-llm-btn" data-id="\${ep.id}" data-name="\${escapeHtml(ep.model)}">
+                        <i class="bi bi-trash"></i> 删除
+                    </button>
+                </div>
+            \`;
+            cardBody.appendChild(item);
+        });
+
+        card.appendChild(cardBody);
+        mobileContainer.appendChild(card);
+    });
+
+    bindAdminLlmEvents(mobileContainer);
+}
+
+function bindAdminLlmEvents(container) {
+    container.querySelectorAll('.admin-provider-toggle').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const providerKey = this.getAttribute('data-provider-key');
+            llmProviderExpansionState[providerKey] = !(llmProviderExpansionState[providerKey] !== false);
+            renderGroupedAdminLlmTable(llmEndpointList);
+            renderGroupedMobileAdminLlmCards(llmEndpointList);
+        });
+    });
+
+    container.querySelectorAll('.edit-llm-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            showLlmEndpointModal(this.getAttribute('data-id'));
+        });
+    });
+
+    container.querySelectorAll('.delete-llm-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            showDeleteLlmEndpointConfirmation(this.getAttribute('data-id'), this.getAttribute('data-name'));
+        });
+    });
+
+    container.querySelectorAll('.llm-visibility-toggle').forEach(toggle => {
+        toggle.addEventListener('change', async function() {
+            const endpointId = this.getAttribute('data-llm-id');
+            const isPublic = this.checked;
+            try {
+                await apiRequest(\`/api/admin/llm-endpoints/\${endpointId}/visibility\`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ is_public: isPublic })
+                });
+                showToast('success', '可见性更新成功');
+            } catch (error) {
+                this.checked = !this.checked;
+                showToast('danger', '更新可见性失败: ' + error.message);
+            }
+        });
+    });
+
+    container.querySelectorAll('.llm-notification-toggle').forEach(toggle => {
         toggle.addEventListener('change', async function() {
             const endpointId = this.getAttribute('data-llm-id');
             const enableNotifications = this.checked;
