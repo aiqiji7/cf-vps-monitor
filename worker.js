@@ -126,6 +126,24 @@ async function scheduleVpsBatchFlush(env, ctx) {
   }
 }
 
+// ==================== 监控状态阈值常量 ====================
+// HIGH_LATENCY 阈值：成功响应但响应过慢时单独标记，仅展示不触发故障通知
+const WEBSITE_HIGH_LATENCY_MS = 3000;       // 网站HEAD检查 >3s 视为高延迟
+const WEBSITE_CHECK_TIMEOUT_MS = 15000;     // 网站检查超时时间（原10s，提高以容纳高延迟判定）
+const LLM_HIGH_LATENCY_MS = 20000;          // LLM POST+推理 >20s 视为高延迟
+const DEFAULT_LLM_TIMEOUT_MS = 45000;       // LLM 默认超时
+const MIN_LLM_TIMEOUT_MS = 21000;           // LLM 超时下限，必须 > LLM_HIGH_LATENCY_MS
+const MAX_LLM_TIMEOUT_MS = 120000;          // LLM 超时上限
+
+// 规范化 LLM 超时：缺省/越界回退到默认值
+function normalizeLlmTimeout(timeout_ms) {
+  const v = Number(timeout_ms);
+  if (!Number.isFinite(v) || v < MIN_LLM_TIMEOUT_MS || v > MAX_LLM_TIMEOUT_MS) {
+    return DEFAULT_LLM_TIMEOUT_MS;
+  }
+  return Math.floor(v);
+}
+
 // ==================== 配置缓存系统 ====================
 
 class ConfigCache {
@@ -943,7 +961,7 @@ const D1_SCHEMAS = {
       model TEXT NOT NULL,
       check_prompt TEXT DEFAULT 'Say hello in one word',
       expected_contains TEXT,
-      timeout_ms INTEGER DEFAULT 30000,
+      timeout_ms INTEGER DEFAULT 45000,
       added_at INTEGER NOT NULL,
       last_checked INTEGER,
       last_status TEXT DEFAULT 'PENDING',
@@ -1007,6 +1025,16 @@ async function applySchemaAlterations(db) {
     } catch (e) {
       // 静默处理重复列错误
     }
+  }
+
+  // 迁移老数据：把 timeout_ms 为 NULL 或旧默认 30000 的 LLM 端点升到 DEFAULT_LLM_TIMEOUT_MS
+  // 30000 低于新的 MIN_LLM_TIMEOUT_MS(21000)，会让 HIGH_LATENCY 阈值失效，需要升级
+  try {
+    await db.prepare(
+      'UPDATE monitored_llm_endpoints SET timeout_ms = ? WHERE timeout_ms IS NULL OR timeout_ms = 30000'
+    ).bind(DEFAULT_LLM_TIMEOUT_MS).run();
+  } catch (e) {
+    // 静默处理（表可能尚未创建）
   }
 }
 
@@ -2612,7 +2640,7 @@ async function handleApiRequest(request, env, ctx) {
       const addedAt = Math.floor(Date.now() / 1000);
       const checkPrompt = check_prompt || 'Say hello in one word';
       const expectedContains = expected_contains || '';
-      const timeoutMs = timeout_ms || 30000;
+      const timeoutMs = normalizeLlmTimeout(timeout_ms);
       const apiKey = api_key || '';
 
       // 获取当前最大 sort_order
@@ -2740,7 +2768,7 @@ async function handleApiRequest(request, env, ctx) {
         const model = ep.model.trim();
         const checkPrompt = ep.check_prompt || 'Say hello in one word';
         const expectedContains = ep.expected_contains || '';
-        const timeoutMs = ep.timeout_ms || 30000;
+        const timeoutMs = normalizeLlmTimeout(ep.timeout_ms);
 
         insertStmts.push(
           env.DB.prepare(`
@@ -2854,7 +2882,7 @@ async function handleApiRequest(request, env, ctx) {
       const apiKey = api_key || '';
       const checkPrompt = check_prompt || 'Say hello in one word';
       const expectedContains = expected_contains || '';
-      const timeoutMs = timeout_ms || 30000;
+      const timeoutMs = normalizeLlmTimeout(timeout_ms);
 
       // 第一个模型：更新当前端点
       const info = await env.DB.prepare(`
@@ -3553,18 +3581,19 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
   const NOTIFICATION_INTERVAL_SECONDS = 1 * 60 * 60; // 1小时
 
   try {
-    // 优化：超时时间从15秒减少到10秒
+    // 超时时间提高到 WEBSITE_CHECK_TIMEOUT_MS 以容纳高延迟判定（>WEBSITE_HIGH_LATENCY_MS 但未超时）
     const response = await fetch(url, {
       method: 'HEAD',
       redirect: 'follow',
-      signal: AbortSignal.timeout(10000) // 10秒超时
+      signal: AbortSignal.timeout(WEBSITE_CHECK_TIMEOUT_MS)
     });
 
     newResponseTime = Date.now() - startTime;
     newStatusCode = response.status;
 
     if (response.ok || (response.status >= 300 && response.status < 500)) {
-      newStatus = 'UP';
+      // 可用：响应过慢则单独标记为 HIGH_LATENCY，仅展示不触发故障通知
+      newStatus = newResponseTime > WEBSITE_HIGH_LATENCY_MS ? 'HIGH_LATENCY' : 'UP';
     } else {
       newStatus = 'DOWN';
     }
@@ -3596,12 +3625,11 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
         newSiteLastNotifiedDownAt = checkTime;
       }
     }
-  } else if (newStatus === 'UP' && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
+  } else if ((newStatus === 'UP' || newStatus === 'HIGH_LATENCY') && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
     const message = `✅ 网站恢复: *${siteDisplayName}* 已恢复在线!\n网址: ${url}`;
     ctx.waitUntil(sendNotifications(db, message));
     newSiteLastNotifiedDownAt = null;
   }
-
   // 批量更新数据库
   try {
     await db.batch([
@@ -3647,7 +3675,7 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
   }
 
   const NOTIFICATION_INTERVAL_SECONDS = 1 * 60 * 60; // 1小时
-  const effectiveTimeout = timeout_ms || 30000;
+  const effectiveTimeout = normalizeLlmTimeout(timeout_ms);
 
   try {
     const headers = { 'Content-Type': 'application/json' };
@@ -3691,9 +3719,10 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
             const patterns = expected_contains.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
             const contentLower = content.toLowerCase();
             const matched = patterns.some(p => contentLower.includes(p));
-            newStatus = matched ? 'UP' : 'DOWN';
+            // 可用：响应过慢则单独标记为 HIGH_LATENCY，仅展示不触发故障通知
+            newStatus = matched ? (newResponseTime > LLM_HIGH_LATENCY_MS ? 'HIGH_LATENCY' : 'UP') : 'DOWN';
           } else {
-            newStatus = 'UP';
+            newStatus = newResponseTime > LLM_HIGH_LATENCY_MS ? 'HIGH_LATENCY' : 'UP';
           }
         } else {
           // API 返回 200 但无有效内容
@@ -3744,7 +3773,7 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
         newLastNotifiedDownAt = checkTime;
       }
     }
-  } else if (newStatus === 'UP' && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
+  } else if ((newStatus === 'UP' || newStatus === 'HIGH_LATENCY') && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
     if (enableNotifications) {
       const message = `✅ LLM端点恢复: *${name}* 已恢复在线!\n模型: ${model}\nURL: ${api_url}`;
       ctx.waitUntil(sendNotifications(db, message));
@@ -4410,6 +4439,7 @@ function getIndexHtml() {
         .history-bar-up { background-color: #28a745; } /* Green */
         .history-bar-down { background-color: #dc3545; } /* Red */
         .history-bar-pending { background-color: #6c757d; } /* Gray */
+        .history-bar-high-latency { background-color: #fd7e14; } /* Orange - 高延迟 */
 
         /* Default styling for progress bar text (light mode) */
         .progress span {
@@ -4940,6 +4970,7 @@ function getLoginHtml() {
         .history-bar-up { background-color: #28a745; } /* Green */
         .history-bar-down { background-color: #dc3545; } /* Red */
         .history-bar-pending { background-color: #6c757d; } /* Gray */
+        .history-bar-high-latency { background-color: #fd7e14; } /* Orange - 高延迟 */
 
         /* Default styling for progress bar text (light mode) */
         .progress span {
@@ -5725,7 +5756,8 @@ function getAdminHtml() {
                         </div>
                         <div class="mb-3">
                             <label for="llmEndpointTimeout" class="form-label">超时时间 (ms)</label>
-                            <input type="number" class="form-control" id="llmEndpointTimeout" value="30000" min="5000" max="120000">
+                            <input type="number" class="form-control" id="llmEndpointTimeout" value="45000" min="21000" max="120000">
+                            <div class="form-text">超时时间必须大于高延迟阈值（20秒），建议至少 21 秒。超过 20 秒响应成功会标记为"高延迟"状态（仅展示）。</div>
                         </div>
                     </form>
                 </div>
@@ -8033,7 +8065,7 @@ function renderMobileSiteCards(sites) {
         // 卡片头部
         const cardHeader = document.createElement('div');
         cardHeader.className = 'mobile-card-header';
-        const isSiteUp = site.last_status === 'UP';
+        const isSiteUp = (site.last_status === 'UP' || site.last_status === 'HIGH_LATENCY');
         const titleHtml = isSiteUp && site.name
             ? \`<a href="\${site.url}" target="_blank" rel="noopener noreferrer" class="site-name-link">\${site.name}</a>\`
             : (site.name || '未命名网站');
@@ -8311,7 +8343,7 @@ async function renderSiteStatusTable(sites) {
         historyContainer.className = 'history-bar-container';
         historyCell.appendChild(historyContainer);
 
-        const isSiteUp = site.last_status === 'UP';
+        const isSiteUp = (site.last_status === 'UP' || site.last_status === 'HIGH_LATENCY');
         const nameHtml = site.name
             ? (isSiteUp
                 ? \`<a href="\${site.url}" target="_blank" rel="noopener noreferrer" class="site-name-link">\${site.name}</a>\`
@@ -8361,6 +8393,8 @@ function renderSiteHistoryBar(containerElement, history) {
         if (recordForHour) {
             if (recordForHour.status === 'UP') {
                 barClass = 'history-bar-up';
+            } else if (recordForHour.status === 'HIGH_LATENCY') {
+                barClass = 'history-bar-high-latency';
             } else if (['DOWN', 'TIMEOUT', 'ERROR'].includes(recordForHour.status)) {
                 barClass = 'history-bar-down';
             }
@@ -8500,6 +8534,7 @@ function renderMobileLlmCards(endpoints) {
 function getSiteStatusBadge(status) {
     switch (status) {
         case 'UP': return { class: 'bg-success', text: '正常' };
+        case 'HIGH_LATENCY': return { class: 'bg-warning text-dark', text: '高延迟' };
         case 'DOWN': return { class: 'bg-danger', text: '故障' };
         case 'TIMEOUT': return { class: 'bg-warning text-dark', text: '超时' };
         case 'ERROR': return { class: 'bg-danger', text: '错误' };
@@ -10378,6 +10413,7 @@ async function performSiteDragSort(draggedSiteId, targetSiteId, insertBefore) {
 function getSiteStatusBadge(status) {
     switch (status) {
         case 'UP': return { class: 'bg-success', text: '正常' };
+        case 'HIGH_LATENCY': return { class: 'bg-warning text-dark', text: '高延迟' };
         case 'DOWN': return { class: 'bg-danger', text: '故障' };
         case 'TIMEOUT': return { class: 'bg-warning text-dark', text: '超时' };
         case 'ERROR': return { class: 'bg-danger', text: '错误' };
@@ -10758,7 +10794,7 @@ function showLlmEndpointModal(endpointIdToEdit = null) {
             document.getElementById('llmEndpointModel').value = ep.model;
             document.getElementById('llmEndpointPrompt').value = ep.check_prompt || '';
             document.getElementById('llmEndpointExpected').value = ep.expected_contains || '';
-            document.getElementById('llmEndpointTimeout').value = ep.timeout_ms || 30000;
+            document.getElementById('llmEndpointTimeout').value = ep.timeout_ms || 45000;
         } else {
             showToast('danger', '未找到要编辑的端点信息');
             return;
@@ -10807,7 +10843,7 @@ async function saveLlmEndpoint() {
     const modelInput = document.getElementById('llmEndpointModel').value;
     const check_prompt = document.getElementById('llmEndpointPrompt').value.trim();
     const expected_contains = document.getElementById('llmEndpointExpected').value.trim();
-    const timeout_ms = parseInt(document.getElementById('llmEndpointTimeout').value, 10) || 30000;
+    const timeout_ms = parseInt(document.getElementById('llmEndpointTimeout').value, 10) || 45000;
 
     if (!api_url) {
         showToast('warning', '请输入API URL');
