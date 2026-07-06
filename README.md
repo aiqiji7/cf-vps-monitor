@@ -1,170 +1,224 @@
-# 自从上次更新以来，由于一直太忙没空搞，预计年后会有时间，会把一些问题尽量修复，感谢各位一直以来的支持！
+# cf-vps-monitor 二开版
 
-# cf-vps-monitor
-[简体中文](https://github.com/kadidalax/cf-vps-monitor/blob/main/README.md) | [English](https://github.com/kadidalax/cf-vps-monitor/blob/main/README-EN.md)
-## 用cloudflare worker搭建的vps探针 + 网站检测面板。
-面板示例：https://vps-monitor.abo-vendor289.workers.dev/
+[简体中文](https://github.com/aiqiji7/cf-vps-monitor/blob/main/README.md) | [English](https://github.com/aiqiji7/cf-vps-monitor/blob/main/README-EN.md)
 
-PC端前台：
+这是一个基于 Cloudflare Worker + D1 的 VPS 探针、网站检测和 LLM 端点可用性监控面板。
 
+## 二开说明
 
+本项目是基于原项目的二次开发版本。
 
-移动端前台：
+- 当前项目地址：https://github.com/aiqiji7/cf-vps-monitor
+- 原项目地址：https://github.com/kadidalax/cf-vps-monitor
 
+### 与原项目的主要区别
 
+- 新增 LLM 端点可用性监控，支持 OpenAI 兼容的 `/v1/chat/completions` 接口。
+- 支持按 Provider 分组展示 LLM 端点；未填写 Provider 名称时，会自动使用 API URL 的域名作为默认名称。
+- 新增 LLM 高延迟阈值、LLM 超时阈值和网站高延迟阈值配置。
+- 后台阈值和页面响应时间统一以秒 `s` 展示；内部数据库和检测逻辑仍使用毫秒，避免破坏历史数据。
+- 区分正常、高延迟、超时、故障、错误、待检测等状态；超时和高延迟在 badge、行背景和 24 小时记录色块中使用不同颜色。
+- 用户刷新前台页面时，会自动触发一次公开 LLM 端点可用性检测。
+- LLM 端点支持输出预览、期望内容匹配、公开展示开关、通知开关和 24 小时状态历史。
+- 管理后台拆分网站阈值和 LLM 阈值，网站高延迟阈值放在网站监控管理区，LLM 阈值放在 LLM 端点管理区。
+- 保留并增强 VPS 监控、网站监控、Telegram/ntfy 通知、自定义背景、页面透明度、排序和可见性控制等功能。
 
-后台：
+## 功能概览
 
+### VPS 监控
 
+- 通过 `cf-vps-monitor.sh` Agent 上报 VPS 状态。
+- 展示 CPU、内存、磁盘、上传/下载速度、总流量、运行时长和最后更新时间。
+- 后台自动生成服务器 ID、API Key 和一键安装命令。
+- 支持服务器排序、公开展示开关和后台管理。
 
+### 网站在线检测
 
+- 支持添加 HTTP/HTTPS 网站 URL。
+- 展示状态、状态码、响应时间和 24 小时历史记录。
+- 支持网站高延迟阈值配置，页面以秒 `s` 显示。
+- 支持公开展示开关、排序和后台管理。
 
-# VPS 监控面板 (Cloudflare Worker + D1 版) - 部署指南
+### LLM 端点可用性监控
 
-这是一个部署在 Cloudflare Workers 上的简单 VPS 监控面板，使用 Cloudflare D1 数据库存储数据。本指南将引导你通过 Cloudflare **网页控制面板** 完成部署，无需使用命令行工具。
+- 支持 OpenAI 兼容接口，例如：`https://api.example.com/v1/chat/completions`。
+- 支持配置 API Key、模型名称、测试 Prompt、期望包含内容和超时时间。
+- 支持多个模型批量添加：每行一个、逗号分隔或 JSON 数组。
+- 支持 Provider 分组；Provider 名称为空时自动取 API URL 域名，例如 `https://api.openai.com/v1/chat/completions` 会显示为 `api.openai.com`。
+- 状态包括：正常、高延迟、超时、故障、错误、待检测。
+- 支持 LLM 高延迟阈值和 LLM 超时阈值配置，后台输入和前台展示均使用秒 `s`。
+- 前台页面加载/刷新时会自动排队触发一次公开 LLM 端点检测。
+- 24 小时历史色块会区分高延迟、超时和故障。
 
-## 先决条件
+### 通知与外观
 
-*   一个 Cloudflare 账户。
+- 支持 Telegram 通知。
+- 支持 ntfy 通知。
+- 支持自定义背景图和页面透明度。
+- 支持浅色/暗色主题。
+
+## 状态颜色说明
+
+- 正常：绿色。
+- 高延迟：黄色。
+- 超时：橙色。
+- 故障/错误：红色。
+- 待检测/无记录：灰色。
+
+## 部署要求
+
+- 一个 Cloudflare 账户。
+- 一个 Cloudflare D1 数据库。
+- 一个 Cloudflare Worker。
+- 建议配置 `JWT_SECRET`，并在首次登录后立即修改默认密码。
 
 ## 部署步骤
 
 ### 1. 创建 D1 数据库
 
-你需要一个 D1 数据库来存储面板数据（服务器列表、API 密钥、监控数据等）。
+1. 登录 Cloudflare 控制面板。
+2. 进入 `存储和数据库` → `D1 SQL 数据库`。
+3. 点击 `创建数据库`。
+4. 数据库名称可自定义，例如 `vps-monitor-db`。
 
-1.  登录 Cloudflare 控制面板。
-2.  在左侧菜单中，找到并点击 `存储和数据库`。
-3.  在下拉菜单中，选择 `D1 SQL 数据库`。
-4.  点击 `创建数据库`。
-5.  为数据库命名（例如 `vps-monitor-db`），然后点击 `创建`。
-### 2. 创建并配置 Worker
+### 2. 创建 Worker 并部署代码
 
-接下来，创建 Worker 并将代码部署上去。
+1. 进入 `Workers & Pages`。
+2. 创建一个 Worker。
+3. 打开 Worker 在线编辑器。
+4. 删除默认代码。
+5. 将本仓库 `worker.js` 的全部内容复制进去。
+6. 点击部署。
 
-1.  在左侧菜单中，点击 `计算(Workers)`，选择 `Workers & Pages`。
-2.  在概览页面，点击 `创建`。
-3.  选择 `Start with Hello World!`点击`开始使用`。
-4.  为你的 Worker 命名（例如 `vps-monitor-worker`），确保名称可用。
-5.  点击 `部署`。
-6.  部署完成后，点击 `编辑代码` 进入 Worker 编辑器。
-7.  **删除编辑器中现有的所有代码**。
-8.  打开本仓库的 `worker.js` 文件，复制其**全部**内容。
-9.  将复制的代码粘贴到 Cloudflare Worker 编辑器中。
-10. 点击编辑器右上角的 `部署` 按钮。
+### 3. 配置环境变量
 
-### 3. 添加环境变量
+在 Worker 的 `设置` → `变量和机密` 中添加：
 
-在 `设置` → `变量和机密` 中添加以下环境变量，以增加安全性：
-1. 可选变量名：`USERNAME`，类型：`密钥`， 值：`任意随机字符串`
-2. 可选变量名：`PASSWORD`，类型：`密钥`， 值：`任意随机字符串`
-3. 变量名：`JWT_SECRET`，类型：`密钥`， 值：`任意30位左右的随机字符串`
-4. 添加完保存并部署
+| 变量名 | 必填 | 说明 |
+| --- | --- | --- |
+| `JWT_SECRET` | 建议必填 | 登录 Token 签名密钥，建议使用 30 位以上随机字符串 |
+| `USERNAME` | 可选 | 初始管理员用户名，不填时使用默认值 |
+| `PASSWORD` | 可选 | 初始管理员密码，不填时使用默认值 |
 
-### 4. 绑定 D1 数据库到 Worker
+默认登录信息：
 
-Worker 需要访问你之前创建的 D1 数据库。
+- 用户名：`admin`
+- 密码：`monitor2025!`
 
-1.  在 Worker 的管理页面（编辑代码页面上方有 Worker 名称，点击它可以返回管理页面），选择 `绑定` 标签页。
-2.  选择`D1数据库`。
-3.  在 `变量名称` 处输入 `DB` (必须大写)。
-4.  在 `D1 数据库` 下拉菜单中，选择你之前创建的数据库 (例如 `vps-monitor-db`)。
-5.  点击 `部署`。
-6.  **重要！初始化数据库：** 复制你的Worker URL到浏览器，后面加上`/api/init-db`，如`vps-monitor.abo-vendor289.workers.dev/api/init-db`，打开此链接后会看到 `{"success":true,"message":"数据库初始化完成"}` 即表明数据库已准备完毕。
+首次登录后请立即修改密码。
 
-### 5. 设置触发频率（检测网站用）
+### 4. 绑定 D1 数据库
 
-1.  在 Worker 的管理页面选择 `设置` 标签页。
-2.  在设置页面中，选择 `触发事件` 子菜单。
-3.  点击`添加`，选择`Cron触发器`。
-4.  选择`计划`，执行 Worker 的频率选择`小时`，下面的框填入1（即每整点检测一次网站）。
-5.  点击`添加`。
+1. 进入 Worker 设置。
+2. 找到绑定配置。
+3. 添加 D1 数据库绑定。
+4. 变量名称必须填写：`DB`。
+5. 选择你创建的 D1 数据库并保存部署。
 
-### 6. 访问面板
+### 5. 初始化数据库
 
-部署和绑定完成后，你的监控面板应该可以通过 Worker 的 URL 访问了。
+部署完成并绑定 D1 后，访问：
 
-*   在设置页面你会看到一个 `.workers.dev` 的 URL，例如 `vps-monitor.abo-vendor289.workers.dev`。
-*   在浏览器中打开这个 URL，你应该能看到监控面板的前端界面。
-
-## 使用面板
-
-### 1. 初始登录
-
-1.  访问你的 Worker URL。
-2.  点击页面右上角的 `登录` 或直接访问 `/login` 路径 (例如 `https://vps-monitor.abo-vendor289.workers.dev/login`)。
-3.  使用环境变量凭证或默认凭据登录：
-    *   默认用户名: `admin`
-    *   默认密码: `monitor2025!`
-4.  登录后，立即修改密码！立即修改密码！立即修改密码！！！
-
-### 2. 添加服务器
-
-1.  登录后台后，你应该会看到管理界面。
-2.  找到添加服务器的选项。
-3.  输入服务器的名称和可选的描述。
-4.  点击 `保存`。
-5.  面板会自动生成一个唯一的 `服务器 ID` 和 `API 密钥`，后台可以随时查看，部署 Agent 时需要用到。
-
-### 3. 部署 Agent (探针)
-
-Agent 是一个需要在你的 VPS 上运行的脚本，用于收集状态信息并发送回面板。
-
-有两种方式安装Agent脚本：
-
-第一种是直接从后台复制带有参数的命令一键安装（推荐）
-![image](https://github.com/kadidalax/cf-vps-monitor/blob/main/pic/setting.jpg)
-
-第二种是：下载脚本并运行：
+```text
+https://你的-worker-url/api/init-db
 ```
-wget -O cf-vps-monitor.sh https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
+
+看到类似下面的结果即表示初始化成功：
+
+```json
+{"success": true, "message": "数据库初始化完成"}
 ```
-或者下载脚本并运行：
+
+### 6. 添加 Cron 触发器
+
+在 Worker 的触发器中添加 Cron，用于定时检测网站和 LLM 端点。
+
+建议先设置为每小时执行一次。后台可以配置 LLM 探测频率倍数，例如：
+
+- `1`：每次 Cron 都检测 LLM。
+- `2`：每两次 Cron 检测一次 LLM。
+- `3`：每三次 Cron 检测一次 LLM。
+
+## 使用说明
+
+### 登录后台
+
+访问 Worker URL，点击右上角管理员登录，或访问：
+
+```text
+https://你的-worker-url/login.html
 ```
-curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
+
+登录后请先修改默认密码。
+
+### 添加 VPS 服务器
+
+1. 后台点击添加服务器。
+2. 输入服务器名称和描述。
+3. 保存后系统会生成服务器 ID 和 API Key。
+4. 在后台复制一键安装命令到 VPS 上执行。
+
+也可以手动下载脚本：
+
+```bash
+wget -O cf-vps-monitor.sh https://raw.githubusercontent.com/aiqiji7/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
 ```
-*   安装需要  `服务器ID` `API密钥` 和你的 `worker网址`
-*   可以在后台点击 `查看密钥` 来获取上述三个参数
-*   按照提示输入安装完成后，Agent 会开始定期向你的面板发送数据。你应该能在面板上看到对应服务器的状态更新。
 
-### 4. Agent 管理
+或：
 
-安装脚本本身也提供了管理功能：
+```bash
+curl -O https://raw.githubusercontent.com/aiqiji7/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
+```
 
-*   **安装服务:** 
-*   **卸载服务:** 
-*   **查看状态:** 
-*   **查看日志:** 
-*   **停止服务:**
-*   **重启服务:**
-*   **修改配置:**
+安装时需要填写：
 
-### 5. 添加检测网站
+- 服务器 ID。
+- API Key。
+- Worker 地址。
 
-1.  登录后台后，你应该会看到管理界面。
-2.  点击`添加监控网站`。
-3.  输入`网站名称（可选）`和`网站URL 如(https://example.com)`。
-4.  点击`保存`。
+### 添加网站监控
 
-### 6. 配置Telegram 通知
+1. 后台点击添加监控网站。
+2. 输入网站名称和 URL。
+3. 保存后会按 Cron 周期检测。
+4. 可在网站监控管理区调整网站高延迟阈值，单位为秒 `s`。
 
-1.  BotFather创建bot并获取`Bot Token`。
-2.  `@userinfobot`获取自己的`ID`。
-3.  将上述两项分别填入。
-4.  启用通知，点击`保存Telegram设置`后会受到一条测试通知，说明配置正确。
+### 添加 LLM 端点
 
-### 7. 配置自定义背景和透明度
+1. 后台点击添加 LLM 端点。
+2. 输入 API URL，例如：`https://api.example.com/v1/chat/completions`。
+3. 输入模型名称，支持多个模型批量添加。
+4. 可填写 API Key、测试 Prompt、期望包含内容和超时时间。
+5. Provider 名称可留空，系统会自动使用 API URL 的域名。
+6. 可在 LLM 端点管理区配置：
+   - LLM 高延迟阈值，单位为秒 `s`。
+   - LLM 超时阈值，单位为秒 `s`。
+   - LLM 探测频率倍数。
 
-1.  找一张好看的背景图。
-2.  上传到图床，得到该图的链接（如：https://i.111666.best/image/QbF51RYyzcHFTBnOhICxdY.jpg ）
-3.  将此链接填入背景图片URL框，并勾选 `启用自定义背景`。
-4.  调整 `面透明度` 滑块。
-5.  点击 `保存背景设置`
+## 时间单位说明
+
+页面和后台表单统一使用秒 `s`：
+
+- 响应时间显示为秒。
+- 网站高延迟阈值显示为秒。
+- LLM 高延迟阈值显示为秒。
+- LLM 超时阈值显示为秒。
+- LLM 端点超时时间显示为秒。
+
+代码内部、数据库字段和 API payload 仍使用毫秒，字段名也保留 `_ms`，这是为了兼容已有数据和检测逻辑。
 
 ## 注意事项
 
-*   **Worker 和 D1 每日配额:** 本项目当前最大的限制是Worker请求数，主要是vps上报数据的消耗，每日请求数可以用这个公式计算：vps数量 *（86400/上报频率），得到的数字再除以100000就是已消耗百分比。
-*   **安全性:** 默认密码非常不安全 ，请务必在首次登录后修改。Agent 使用的 API 密钥也应妥善保管。
-*   **错误处理:** 如果面板或 Agent 遇到问题，可以检查 Worker 的日志（在 Cloudflare 控制面板 Worker 页面）和 Agent 的日志。
-*   以上所有内容和代码均为AI生成，出现问题请直接拿着代码找AI吧。
+- Cloudflare Worker 和 D1 有免费额度限制。VPS 越多、上报频率越高，请求和写入消耗越大。
+- LLM 端点检测会请求外部 API。页面刷新会额外触发一次公开 LLM 端点检测，可能增加外部 API 调用量。
+- 默认密码不安全，请首次登录后立即修改。
+- API Key、Telegram Token、ntfy topic 等敏感信息请妥善保管。
+- 如果部署后页面异常，请检查 Worker 日志、D1 绑定变量名是否为 `DB`，以及是否已访问 `/api/init-db` 初始化数据库。
 
+## 致谢
+
+感谢原项目作者提供基础版本：
+
+- 原项目：https://github.com/kadidalax/cf-vps-monitor
+
+本仓库是在原项目基础上的二次开发版本，当前功能和界面以本仓库代码为准。

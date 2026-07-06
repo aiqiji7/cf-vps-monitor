@@ -1,170 +1,224 @@
-# cf-vps-monitor
-[简体中文](https://github.com/kadidalax/cf-vps-monitor/blob/main/README.md) | [English](https://github.com/kadidalax/cf-vps-monitor/blob/main/README-EN.md)
+# cf-vps-monitor Fork
 
-## VPS monitoring probe + website detection panel built with Cloudflare Worker.
+[简体中文](https://github.com/aiqiji7/cf-vps-monitor/blob/main/README.md) | [English](https://github.com/aiqiji7/cf-vps-monitor/blob/main/README-EN.md)
 
-Panel Demo: https://vps-monitor.abo-vendor289.workers.dev/
+This project is a Cloudflare Worker + D1 based monitoring panel for VPS probes, website checks, and LLM endpoint availability checks.
 
-PC Frontend:
+## Fork Notice
 
-![image](https://github.com/kadidalax/cf-vps-monitor/blob/main/pic/front.jpg)
+This repository is a secondary-development fork based on the original project.
 
-Mobile Frontend:
+- Current repository: https://github.com/aiqiji7/cf-vps-monitor
+- Original repository: https://github.com/kadidalax/cf-vps-monitor
 
-![image](https://github.com/kadidalax/cf-vps-monitor/blob/main/pic/mobile.jpg)
+### Main Differences From The Original Project
 
-Backend:
+- Added LLM endpoint availability monitoring for OpenAI-compatible `/v1/chat/completions` APIs.
+- Added Provider grouping for LLM endpoints. If the Provider name is empty, the API URL domain is used automatically.
+- Added configurable website high-latency threshold, LLM high-latency threshold, and LLM timeout threshold.
+- User-facing response times and thresholds are displayed in seconds `s`; internal database fields and detection logic still use milliseconds for compatibility.
+- Added distinct visual states for normal, high latency, timeout, down, error, and pending.
+- Timeout and high-latency states use different badge colors, row backgrounds, and 24-hour history bar colors.
+- Frontend page refresh queues one public LLM endpoint availability check automatically.
+- LLM endpoints support output preview, expected-content matching, public visibility toggle, notification toggle, and 24-hour status history.
+- The admin page separates website thresholds from LLM thresholds.
+- VPS monitoring, website monitoring, Telegram/ntfy notifications, custom background, opacity, sorting, and visibility controls are retained and improved.
 
-![image](https://github.com/kadidalax/cf-vps-monitor/blob/main/pic/back.jpg)
+## Features
 
-# VPS Monitoring Panel (Cloudflare Worker + D1) - Deployment Guide
+### VPS Monitoring
 
-This is a simple VPS monitoring panel deployed on Cloudflare Workers, using Cloudflare D1 database for data storage. This guide will walk you through the deployment process using the Cloudflare **web dashboard**, without requiring command-line tools.
+- Reports VPS metrics through the `cf-vps-monitor.sh` agent.
+- Displays CPU, memory, disk, upload/download speed, total traffic, uptime, and last update time.
+- Generates server ID, API key, and one-click installation commands in the admin panel.
+- Supports sorting, public visibility, and admin management.
 
-## Prerequisites
+### Website Monitoring
 
-* A Cloudflare account.
+- Adds HTTP/HTTPS websites for availability checks.
+- Displays status, status code, response time, and 24-hour history.
+- Supports configurable website high-latency threshold in seconds `s`.
+- Supports sorting, public visibility, and admin management.
+
+### LLM Endpoint Monitoring
+
+- Supports OpenAI-compatible endpoints such as `https://api.example.com/v1/chat/completions`.
+- Supports API key, model name, test prompt, expected-content matching, and timeout settings.
+- Supports batch adding multiple models via newline, comma-separated text, or JSON array.
+- Supports Provider grouping. If Provider name is empty, the API URL domain is used, for example `https://api.openai.com/v1/chat/completions` becomes `api.openai.com`.
+- Statuses include normal, high latency, timeout, down, error, and pending.
+- Supports configurable LLM high-latency threshold and LLM timeout threshold in seconds `s`.
+- Queues one public LLM endpoint check when the frontend page loads or refreshes.
+- The 24-hour history bar distinguishes high latency, timeout, and down/error states.
+
+### Notifications And UI
+
+- Telegram notifications.
+- ntfy notifications.
+- Custom background image and page opacity.
+- Light and dark themes.
+
+## Status Colors
+
+- Normal: green.
+- High latency: yellow.
+- Timeout: orange.
+- Down/error: red.
+- Pending/no record: gray.
+
+## Deployment Requirements
+
+- A Cloudflare account.
+- A Cloudflare D1 database.
+- A Cloudflare Worker.
+- `JWT_SECRET` is recommended. Change the default password immediately after first login.
 
 ## Deployment Steps
 
-### 1. Create D1 Database
-
-You need a D1 database to store panel data (server list, API keys, monitoring data, etc.).
+### 1. Create A D1 Database
 
 1. Log in to the Cloudflare dashboard.
-2. In the left menu, find and click `Storage & Databases`.
-3. In the dropdown menu, select `D1 SQL Database`.
-4. Click `Create Database`.
-5. Name your database (e.g., `vps-monitor-db`), then click `Create`.
+2. Go to `Storage & Databases` → `D1 SQL Database`.
+3. Click `Create Database`.
+4. Use any database name, such as `vps-monitor-db`.
 
-### 2. Create and Configure Worker
+### 2. Create A Worker And Deploy Code
 
-Next, create a Worker and deploy the code.
+1. Go to `Workers & Pages`.
+2. Create a Worker.
+3. Open the online Worker editor.
+4. Delete the default code.
+5. Copy the full content of `worker.js` from this repository.
+6. Paste it into the Worker editor and deploy.
 
-1. In the left menu, click `Compute (Workers)`, select `Workers & Pages`.
-2. On the overview page, click `Create`.
-3. Select `Start with Hello World!` and click `Get Started`.
-4. Name your Worker (e.g., `vps-monitor-worker`), ensure the name is available.
-5. Click `Deploy`.
-6. After deployment, click `Edit Code` to enter the Worker editor.
-7. **Delete all existing code** in the editor.
-8. Open the `worker.js` file from this repository and copy **all** its content.
-9. Paste the copied code into the Cloudflare Worker editor.
-10. Click the `Deploy` button in the top-right corner of the editor.
+### 3. Configure Environment Variables
 
-### 3. Add Environment Variables
+Add these variables in Worker `Settings` → `Variables and Secrets`:
 
-In `Settings` → `Variables and Secrets`, add the following environment variables for enhanced security:
-1. Variable Name: `JWT_SECRET`, Type: `Secret`, Value: `Any random string of about 30 characters`
-2. Save and deploy after adding
+| Variable | Required | Description |
+| --- | --- | --- |
+| `JWT_SECRET` | Recommended | Token signing secret. Use a random string of 30+ characters. |
+| `USERNAME` | Optional | Initial admin username. Uses default if empty. |
+| `PASSWORD` | Optional | Initial admin password. Uses default if empty. |
 
-### 4. Bind D1 Database to Worker
+Default login:
 
-The Worker needs access to the D1 database you created earlier.
+- Username: `admin`
+- Password: `monitor2025!`
 
-1. In the Worker management page (click the Worker name above the edit code page to return to management page), select the `Bindings` tab.
-2. Select `D1 Database`.
-3. Enter `DB` (must be uppercase) in the `Variable Name` field.
-4. In the `D1 Database` dropdown, select the database you created earlier (e.g., `vps-monitor-db`).
-5. Click `Deploy`.
-6. **Important! Initialize Database:** Copy your Worker URL to browser and append `/api/init-db`, like `vps-monitor.abo-vendor289.workers.dev/api/init-db`. Opening this link should show `{"success":true,"message":"数据库初始化完成"}` indicating the database is ready.
+Change the password immediately after first login.
 
-### 5. Set Trigger Frequency (for website monitoring)
+### 4. Bind The D1 Database
 
-1. In the Worker management page, select the `Settings` tab.
-2. In the settings page, select the `Triggers` submenu.
-3. Click `Add`, select `Cron Trigger`.
-4. Select `Schedule`, set Worker execution frequency to `Hourly`, fill in 1 in the box below (i.e., check websites every hour).
-5. Click `Add`.
+1. Open Worker settings.
+2. Add a D1 database binding.
+3. The binding variable name must be `DB`.
+4. Select your D1 database and redeploy.
 
-### 6. Access Panel
+### 5. Initialize Database
 
-After deployment and binding are complete, your monitoring panel should be accessible via the Worker's URL.
+After deployment and D1 binding, visit:
 
-* In the settings page, you'll see a `.workers.dev` URL, e.g., `vps-monitor.abo-vendor289.workers.dev`.
-* Open this URL in your browser, and you should see the monitoring panel's frontend interface.
-
-## Using the Panel
-
-### 1. Initial Login
-
-1. Visit your Worker URL.
-2. Click `Login` in the top-right corner of the page or directly access the `/login` path (e.g., `https://vps-monitor.abo-vendor289.workers.dev/login`).
-3. Login with credentials:
-   * Username: `admin`
-   * Password: `monitor2025!`
-4. After login, change the password immediately! Change the password immediately! Change the password immediately!!!
-
-### 2. Add Server
-
-1. After logging into the backend, you should see the management interface.
-2. Find the option to add a server.
-3. Enter the server name and optional description.
-4. Click `Save`.
-5. The panel will automatically generate a unique `Server ID` and `API Key`, which can be viewed in the backend at any time and are needed when deploying the Agent.
-
-### 3. Deploy Agent (Probe)
-
-The Agent is a script that needs to run on your VPS to collect status information and send it back to the panel.
-
-There are two ways to install the Agent script:
-
-First method is to copy the command with parameters directly from the backend for one-click installation (recommended):
-![image](https://github.com/kadidalax/cf-vps-monitor/blob/main/pic/setting.jpg)
-
-Second method: Download and run the script:
+```text
+https://your-worker-url/api/init-db
 ```
-wget -O cf-vps-monitor.sh https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
+
+If initialization succeeds, you will see a response like:
+
+```json
+{"success": true, "message": "数据库初始化完成"}
 ```
-Or download and run the script:
+
+### 6. Add A Cron Trigger
+
+Add a Cron trigger for scheduled website and LLM checks.
+
+Hourly execution is a reasonable starting point. The admin panel can configure the LLM check frequency multiplier:
+
+- `1`: check LLM endpoints on every Cron run.
+- `2`: check LLM endpoints every two Cron runs.
+- `3`: check LLM endpoints every three Cron runs.
+
+## Usage
+
+### Login
+
+Open your Worker URL and click admin login, or visit:
+
+```text
+https://your-worker-url/login.html
 ```
-curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
+
+Change the default password immediately after login.
+
+### Add A VPS Server
+
+1. Click add server in the admin panel.
+2. Enter the server name and description.
+3. Save it to generate server ID and API key.
+4. Copy the one-click installation command and run it on your VPS.
+
+You can also download the agent manually:
+
+```bash
+wget -O cf-vps-monitor.sh https://raw.githubusercontent.com/aiqiji7/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
 ```
-* Installation requires `Server ID`, `API Key`, and your `Worker URL`
-* You can click `View Key` in the backend to get these three parameters
-* Follow the prompts to complete installation. After installation, the Agent will start sending data to your panel regularly. You should see status updates for the corresponding server on the panel.
 
-### 4. Agent Management
+Or:
 
-The installation script itself also provides management functions:
+```bash
+curl -O https://raw.githubusercontent.com/aiqiji7/cf-vps-monitor/main/cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh
+```
 
-* **Install Service:**
-* **Uninstall Service:**
-* **View Status:**
-* **View Logs:**
-* **Stop Service:**
-* **Restart Service:**
-* **Modify Configuration:**
+The agent needs:
 
-### 5. Add Website Monitoring
+- Server ID.
+- API key.
+- Worker URL.
 
-1. After logging into the backend, you should see the management interface.
-2. Click `Add Monitoring Website`.
-3. Enter `Website Name (optional)` and `Website URL (e.g., https://example.com)`.
-4. Click `Save`.
+### Add Website Monitoring
 
-### 6. Configure Telegram Notifications
+1. Click add monitored website in the admin panel.
+2. Enter website name and URL.
+3. Save it.
+4. Configure website high-latency threshold in seconds `s` in the website management section.
 
-1. Create a bot with BotFather and get the `Bot Token`.
-2. Get your `ID` from `@userinfobot`.
-3. Fill in both items above respectively.
-4. Enable notifications, click `Save Telegram Settings` and you'll receive a test notification, indicating correct configuration.
+### Add LLM Endpoints
 
-### 7. Configure Custom Background and Transparency
+1. Click add LLM endpoint in the admin panel.
+2. Enter API URL, such as `https://api.example.com/v1/chat/completions`.
+3. Enter one or more model names.
+4. Optionally enter API key, test prompt, expected content, and timeout.
+5. Provider name can be empty. The system will use the API URL domain automatically.
+6. Configure these in the LLM management section:
+   - LLM high-latency threshold in seconds `s`.
+   - LLM timeout threshold in seconds `s`.
+   - LLM check frequency multiplier.
 
-1. Find a nice background image.
-2. Upload this image to an image hosting service and get the image link (e.g., https://i.111666.best/image/QbF51RYyzcHFTBnOhICxdY.jpg).
-3. Fill this link into the background image URL field and check `Enable Custom Background`.
-4. Adjust the `Panel Transparency` slider.
-5. Click `Save Background Settings`.
+## Time Unit Notes
+
+The UI uses seconds `s` for:
+
+- Response time.
+- Website high-latency threshold.
+- LLM high-latency threshold.
+- LLM timeout threshold.
+- LLM endpoint timeout.
+
+Internal code, database fields, and API payloads still use milliseconds. Field names such as `_ms` are intentionally preserved for compatibility.
 
 ## Notes
 
-* **Worker and D1 Daily Quotas:** Cloudflare Worker and D1 free tiers have limitations. Please refer to Cloudflare documentation for details.
-* **Security:** The default password is very insecure. Please change it immediately after first login. API keys used by the Agent should also be kept secure.
-* **Error Handling:** If the panel or Agent encounters issues, you can check the Worker logs (in the Cloudflare dashboard Worker page) and Agent logs.
-* All content and code above are AI-generated. If you encounter problems, please take the code directly to AI for help.
+- Cloudflare Worker and D1 have quota limits. More VPS nodes and shorter report intervals consume more requests and writes.
+- LLM endpoint checks call external APIs. Page refresh queues one extra public LLM endpoint check, which may increase external API usage.
+- The default password is unsafe. Change it after first login.
+- Protect API keys, Telegram tokens, and ntfy topics.
+- If the panel fails after deployment, check Worker logs, ensure the D1 binding name is `DB`, and confirm `/api/init-db` has been visited.
 
-### Sponsorship Welcome🤣:
+## Credits
 
-[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
+Thanks to the original project author for the base implementation:
+
+- Original project: https://github.com/kadidalax/cf-vps-monitor
+
+This repository is a secondary-development fork. Current behavior is defined by this repository's code.
