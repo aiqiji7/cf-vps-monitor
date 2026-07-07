@@ -3954,7 +3954,6 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
     // 静默处理
   }
 
-  const NOTIFICATION_INTERVAL_SECONDS = 1 * 60 * 60; // 1小时
   const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(db);
   const effectiveTimeout = normalizeLlmTimeout(timeout_ms, llmHighLatencyMs, llmTimeoutMs);
 
@@ -4034,32 +4033,16 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
 
   const checkTime = Math.floor(Date.now() / 1000);
   let newLastNotifiedDownAt = lastNotifiedDownAt;
+  const hasStatusChanged = previousStatus !== newStatus;
 
-  // 通知逻辑（仅在启用通知时发送通知，但状态追踪独立于通知开关）
-  if (['DOWN', 'TIMEOUT', 'ERROR'].includes(newStatus)) {
-    const isFirstTimeDown = !['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus);
-    if (isFirstTimeDown) {
-      if (enableNotifications) {
-        const message = `🔴 LLM端点故障: *${displayName}* 当前状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
-        ctx.waitUntil(sendNotifications(db, message));
-      }
-      newLastNotifiedDownAt = checkTime;
-    } else {
-      const shouldResend = lastNotifiedDownAt === null || (checkTime - lastNotifiedDownAt > NOTIFICATION_INTERVAL_SECONDS);
-      if (shouldResend) {
-        if (enableNotifications) {
-          const message = `🔴 LLM端点持续故障: *${displayName}* 状态 ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'}).\n模型: ${model}\nURL: ${api_url}`;
-          ctx.waitUntil(sendNotifications(db, message));
-        }
-        newLastNotifiedDownAt = checkTime;
-      }
-    }
-  } else if ((newStatus === 'UP' || newStatus === 'HIGH_LATENCY') && ['DOWN', 'TIMEOUT', 'ERROR'].includes(previousStatus)) {
+  // LLM端点通知仅在状态发生变化时推送，推送内容包含变化后的状态
+  if (hasStatusChanged) {
+    newLastNotifiedDownAt = ['DOWN', 'TIMEOUT', 'ERROR'].includes(newStatus) ? checkTime : null;
+
     if (enableNotifications) {
-      const message = `✅ LLM端点恢复: *${displayName}* 已恢复在线!\n模型: ${model}\nURL: ${api_url}`;
+      const message = `🔔 LLM端点状态变更: *${displayName}* 状态 ${previousStatus.toLowerCase()} → ${newStatus.toLowerCase()}\n变化后状态: ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'})\n模型: ${model}\nURL: ${api_url}`;
       ctx.waitUntil(sendNotifications(db, message));
     }
-    newLastNotifiedDownAt = null;
   }
 
   // 更新数据库
