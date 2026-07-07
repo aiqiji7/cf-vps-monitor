@@ -4716,6 +4716,39 @@ function getIndexHtml() {
             flex-wrap: wrap;
             justify-content: flex-end;
         }
+        .llm-section-header {
+            flex-wrap: wrap;
+        }
+        .llm-sort-toolbar {
+            flex-shrink: 0;
+        }
+        [data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary {
+            color: #e2e8f0;
+            border-color: #64748b;
+        }
+        [data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary:hover,
+        [data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary:focus {
+            color: #ffffff;
+            background-color: #475569;
+            border-color: #94a3b8;
+        }
+        [data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary.active {
+            color: #ffffff;
+            background-color: #0d6efd;
+            border-color: #0d6efd;
+        }
+        @media (max-width: 576px) {
+            .llm-section-header {
+                align-items: flex-start !important;
+            }
+            .llm-sort-toolbar {
+                width: 100%;
+            }
+            .llm-sort-toolbar .btn {
+                flex: 1 1 0;
+                white-space: nowrap;
+            }
+        }
         .llm-model-badge {
             max-width: 18rem;
             overflow: hidden;
@@ -5164,9 +5197,15 @@ function getIndexHtml() {
         <div class="card shadow-sm">
             <div class="card-body">
                 <div>
-                    <h5 class="card-title mb-3">
-                        <i class="bi bi-robot me-2"></i>LLM 端点可用性
-                    </h5>
+                    <div class="llm-section-header d-flex justify-content-between align-items-center gap-3 mb-3">
+                        <h5 class="card-title mb-0">
+                            <i class="bi bi-robot me-2"></i>LLM 端点可用性
+                        </h5>
+                        <div class="llm-sort-toolbar btn-group btn-group-sm" role="group" aria-label="LLM 模型排序方式">
+                            <button type="button" class="btn btn-outline-secondary active" data-llm-sort-mode="default" aria-pressed="true">默认排序</button>
+                            <button type="button" class="btn btn-outline-secondary" data-llm-sort-mode="availability" aria-pressed="false">按可用性</button>
+                        </div>
+                    </div>
 
                     <div id="noLlmEndpoints" class="alert alert-info d-none">
                         暂无监控 LLM 端点。
@@ -5333,6 +5372,39 @@ function getLoginHtml() {
         .provider-status-summary {
             flex-wrap: wrap;
             justify-content: flex-end;
+        }
+        .llm-section-header {
+            flex-wrap: wrap;
+        }
+        .llm-sort-toolbar {
+            flex-shrink: 0;
+        }
+        [data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary {
+            color: #e2e8f0;
+            border-color: #64748b;
+        }
+        [data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary:hover,
+        [data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary:focus {
+            color: #ffffff;
+            background-color: #475569;
+            border-color: #94a3b8;
+        }
+        [data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary.active {
+            color: #ffffff;
+            background-color: #0d6efd;
+            border-color: #0d6efd;
+        }
+        @media (max-width: 576px) {
+            .llm-section-header {
+                align-items: flex-start !important;
+            }
+            .llm-sort-toolbar {
+                width: 100%;
+            }
+            .llm-sort-toolbar .btn {
+                flex: 1 1 0;
+                white-space: nowrap;
+            }
         }
         .llm-model-badge {
             max-width: 18rem;
@@ -6397,6 +6469,47 @@ body {
 .provider-status-summary {
     flex-wrap: wrap;
     justify-content: flex-end;
+}
+
+.llm-section-header {
+    flex-wrap: wrap;
+}
+
+.llm-sort-toolbar {
+    flex-shrink: 0;
+}
+
+[data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary {
+    color: #e2e8f0;
+    border-color: #64748b;
+}
+
+[data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary:hover,
+[data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary:focus {
+    color: #ffffff;
+    background-color: #475569;
+    border-color: #94a3b8;
+}
+
+[data-bs-theme="dark"] .llm-sort-toolbar .btn-outline-secondary.active {
+    color: #ffffff;
+    background-color: #0d6efd;
+    border-color: #0d6efd;
+}
+
+@media (max-width: 576px) {
+    .llm-section-header {
+        align-items: flex-start !important;
+    }
+
+    .llm-sort-toolbar {
+        width: 100%;
+    }
+
+    .llm-sort-toolbar .btn {
+        flex: 1 1 0;
+        white-space: nowrap;
+    }
 }
 
 .llm-model-badge {
@@ -7982,6 +8095,10 @@ let siteUpdateInterval = null;
 let serverDataCache = {}; // Cache server data to avoid re-fetching for details
 let vpsStatusCache = {}; // 用于跟踪VPS状态变化
 const llmProviderExpansionState = {};
+const LLM_SORT_MODE_DEFAULT = 'default';
+const LLM_SORT_MODE_AVAILABILITY = 'availability';
+let llmSortMode = LLM_SORT_MODE_DEFAULT;
+let latestLlmEndpoints = null;
 const DEFAULT_VPS_REFRESH_INTERVAL_MS = 60000; // Default to 60 seconds for VPS data if backend setting fails
 const DEFAULT_SITE_REFRESH_INTERVAL_MS = 60000; // Default to 60 seconds for Site data
 
@@ -8192,6 +8309,66 @@ function groupLlmEndpointsByProvider(endpoints) {
     return groups;
 }
 
+function getLlmAvailabilityRank(status) {
+    switch (String(status || 'PENDING').toUpperCase()) {
+        case 'UP': return 0;
+        case 'HIGH_LATENCY': return 1;
+        case 'PENDING': return 2;
+        case 'TIMEOUT': return 3;
+        case 'DOWN':
+        case 'ERROR':
+            return 4;
+        default:
+            return 2;
+    }
+}
+
+function getSortedProviderEndpoints(group) {
+    const endpoints = Array.isArray(group?.endpoints) ? group.endpoints : [];
+    if (llmSortMode !== LLM_SORT_MODE_AVAILABILITY) {
+        return endpoints.slice();
+    }
+
+    return endpoints
+        .map((endpoint, index) => ({ endpoint, index }))
+        .sort((a, b) => {
+            const rankDiff = getLlmAvailabilityRank(a.endpoint?.last_status) - getLlmAvailabilityRank(b.endpoint?.last_status);
+            return rankDiff || a.index - b.index;
+        })
+        .map(item => item.endpoint);
+}
+
+function updateLlmSortControls() {
+    document.querySelectorAll('[data-llm-sort-mode]').forEach((button) => {
+        const isActive = button.getAttribute('data-llm-sort-mode') === llmSortMode;
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+}
+
+function initializeLlmSortControls() {
+    const sortButtons = document.querySelectorAll('[data-llm-sort-mode]');
+    if (!sortButtons.length) return;
+
+    sortButtons.forEach((button) => {
+        button.addEventListener('click', function() {
+            const nextSortMode = this.getAttribute('data-llm-sort-mode');
+            if (![LLM_SORT_MODE_DEFAULT, LLM_SORT_MODE_AVAILABILITY].includes(nextSortMode) || nextSortMode === llmSortMode) {
+                updateLlmSortControls();
+                return;
+            }
+
+            llmSortMode = nextSortMode;
+            updateLlmSortControls();
+            if (Array.isArray(latestLlmEndpoints)) {
+                renderGroupedLlmStatusTable(latestLlmEndpoints);
+            }
+        });
+    });
+
+    updateLlmSortControls();
+}
+
 function getProviderStatusSummary(group) {
     const statusGroups = [
         { key: 'DOWN', statuses: ['DOWN', 'ERROR'], text: '故障', badgeStatus: 'DOWN', count: 0 },
@@ -8304,6 +8481,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Initialize theme
     initializeTheme();
+    initializeLlmSortControls();
 
     // Load initial data
     loadAllServerStatuses();
@@ -9117,6 +9295,7 @@ async function loadAllLlmEndpointStatuses() {
             data = await publicApiRequest('/api/llm-endpoints/status');
         }
         const endpoints = data.endpoints || [];
+        latestLlmEndpoints = endpoints;
 
         const noLlmAlert = document.getElementById('noLlmEndpoints');
         const llmStatusTableBody = document.getElementById('llmStatusTableBody');
@@ -9231,10 +9410,17 @@ async function renderGroupedLlmStatusTable(endpoints) {
     if (!tableBody) return;
 
     tableBody.innerHTML = '';
+    if (!endpoints || endpoints.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="7" class="text-center">暂无LLM端点监控数据。</td></tr>';
+        renderGroupedMobileLlmCards([]);
+        return;
+    }
+
     const providerGroups = groupLlmEndpointsByProvider(endpoints);
 
     providerGroups.forEach(group => {
         const expanded = llmProviderExpansionState[group.key] !== false;
+        const sortedEndpoints = getSortedProviderEndpoints(group);
         const providerStatusSummary = renderProviderStatusSummary(group);
         const providerHeader = getProviderHeaderMeta(group);
         const providerRow = document.createElement('tr');
@@ -9257,7 +9443,7 @@ async function renderGroupedLlmStatusTable(endpoints) {
         \`;
         tableBody.appendChild(providerRow);
 
-        group.endpoints.forEach(ep => {
+        sortedEndpoints.forEach(ep => {
             const row = document.createElement('tr');
             row.dataset.providerKey = group.key;
             row.className = 'provider-child-row ' + getLlmStatusRowClass(ep.last_status);
@@ -9294,7 +9480,6 @@ async function renderGroupedLlmStatusTable(endpoints) {
             const providerKey = this.getAttribute('data-provider-key');
             llmProviderExpansionState[providerKey] = !(llmProviderExpansionState[providerKey] !== false);
             renderGroupedLlmStatusTable(endpoints);
-            renderGroupedMobileLlmCards(endpoints);
         });
     });
 
@@ -9315,6 +9500,7 @@ function renderGroupedMobileLlmCards(endpoints) {
 
     providerGroups.forEach(group => {
         const expanded = llmProviderExpansionState[group.key] !== false;
+        const sortedEndpoints = getSortedProviderEndpoints(group);
         const providerStatusSummary = renderProviderStatusSummary(group);
         const providerHeader = getProviderHeaderMeta(group);
         const card = document.createElement('div');
@@ -9332,7 +9518,7 @@ function renderGroupedMobileLlmCards(endpoints) {
             <div class="provider-status-summary d-flex align-items-center gap-2 mt-2">\${providerStatusSummary}</div>
         \`;
 
-        group.endpoints.forEach(ep => {
+        sortedEndpoints.forEach(ep => {
             const statusInfo = getSiteStatusBadge(ep.last_status);
             const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
             const responseTime = formatDurationSeconds(ep.last_response_time_ms);
@@ -9363,7 +9549,6 @@ function renderGroupedMobileLlmCards(endpoints) {
         btn.addEventListener('click', function() {
             const providerKey = this.getAttribute('data-provider-key');
             llmProviderExpansionState[providerKey] = !(llmProviderExpansionState[providerKey] !== false);
-            renderGroupedMobileLlmCards(endpoints);
             renderGroupedLlmStatusTable(endpoints);
         });
     });
