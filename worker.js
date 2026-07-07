@@ -167,6 +167,18 @@ function formatDurationSecondsLabel(valueMs) {
   return `${seconds.toFixed(decimals).replace(/\.?0+$/, '')} s`;
 }
 
+function getLlmStatusEmoji(status) {
+  switch (status) {
+    case 'UP': return '✅';
+    case 'HIGH_LATENCY': return '🟡';
+    case 'DOWN': return '🔴';
+    case 'TIMEOUT': return '⏱️';
+    case 'ERROR': return '❌';
+    case 'PENDING': return '⚪';
+    default: return 'ℹ️';
+  }
+}
+
 // ==================== 配置缓存系统 ====================
 
 class ConfigCache {
@@ -4040,7 +4052,8 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
     newLastNotifiedDownAt = ['DOWN', 'TIMEOUT', 'ERROR'].includes(newStatus) ? checkTime : null;
 
     if (enableNotifications) {
-      const message = `🔔 LLM端点状态变更: *${displayName}* 状态 ${previousStatus.toLowerCase()} → ${newStatus.toLowerCase()}\n变化后状态: ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'})\n模型: ${model}\nURL: ${api_url}`;
+      const newStatusEmoji = getLlmStatusEmoji(newStatus);
+      const message = `🔔 LLM端点状态变更: *${displayName}* 状态 ${previousStatus.toLowerCase()} → ${newStatus.toLowerCase()}\n变化后状态: ${newStatusEmoji} ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'})\n模型: ${model}\nURL: ${api_url}`;
       ctx.waitUntil(sendNotifications(db, message));
     }
   }
