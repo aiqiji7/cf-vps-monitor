@@ -3291,6 +3291,48 @@ async function handleApiRequest(request, env, ctx) {
     }
   }
 
+  // 手动触发单个LLM端点可用性检测（公开可检测公开端点，管理员可检测全部）
+  if (path.match(/\/api\/llm-endpoints\/[^\/]+\/check-now$/) && method === 'POST') {
+    try {
+      const pathParts = path.split('/');
+      const endpointId = pathParts[pathParts.length - 2];
+
+      const user = await authenticateRequestOptional(request, env);
+      const isAdmin = user !== null;
+
+      let query = `
+        SELECT id, name, api_url, api_key, model, check_prompt, expected_contains, timeout_ms
+        FROM monitored_llm_endpoints
+        WHERE id = ?
+      `;
+      if (!isAdmin) {
+        query += ` AND is_public = 1`;
+      }
+
+      const endpoint = await env.DB.prepare(query).bind(endpointId).first();
+
+      if (!endpoint) {
+        return createErrorResponse('Not found', '未找到该LLM端点或无权检测', 404, corsHeaders);
+      }
+
+      const checkCtx = ctx || { waitUntil: (promise) => Promise.resolve(promise).catch(() => {}) };
+      // 同步等待检测完成，以便前端拿到最新状态后刷新
+      await checkLlmEndpointStatus(endpoint, env.DB, checkCtx);
+
+      // 读回最新状态返回给前端
+      const updated = await env.DB.prepare(`
+        SELECT id, model, last_checked, last_status, last_status_code,
+               last_response_time_ms, last_output_preview
+        FROM monitored_llm_endpoints
+        WHERE id = ?
+      `).bind(endpointId).first();
+
+      return createSuccessResponse({ checked: true, endpoint: updated }, corsHeaders);
+    } catch (error) {
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
   // ==================== VPS配置API ====================
 
   // 获取VPS上报间隔（公开，优化版本）
@@ -4053,7 +4095,8 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
 
     if (enableNotifications) {
       const newStatusEmoji = getLlmStatusEmoji(newStatus);
-      const message = `🔔 LLM端点状态变更: *${displayName}* 状态 ${previousStatus.toLowerCase()} → ${newStatus.toLowerCase()}\n变化后状态: ${newStatusEmoji} ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'})\n模型: ${model}\nURL: ${api_url}`;
+      const providerLabel = name ? `${name} / ${model}` : model;
+      const message = `${newStatusEmoji} *${providerLabel}* → ${newStatus.toLowerCase()}\n${previousStatus.toLowerCase()} → ${newStatus.toLowerCase()} (状态码: ${newStatusCode || '无'})`;
       ctx.waitUntil(sendNotifications(db, message));
     }
   }
@@ -6530,6 +6573,83 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     vertical-align: middle;
+}
+
+.llm-model-chip {
+    display: inline-flex;
+    align-items: stretch;
+    max-width: 20rem;
+    vertical-align: middle;
+    border: 1px solid #9eeaf9;
+    border-radius: 999px;
+    overflow: hidden;
+    background-color: #cff4fc;
+    line-height: 1.2;
+}
+
+.llm-model-chip .llm-check-now-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: #0aa2c0;
+    padding: 0 .45rem;
+    border-right: 1px solid rgba(3, 105, 161, .18);
+    cursor: pointer;
+    font-size: .8rem;
+    transition: background-color .15s ease, color .15s ease;
+}
+
+.llm-model-chip .llm-check-now-btn:hover {
+    background-color: rgba(13, 202, 240, .3);
+    color: #055160;
+}
+
+.llm-model-chip .llm-check-now-btn:disabled {
+    opacity: .65;
+    cursor: default;
+}
+
+.llm-model-chip .llm-check-now-btn .spinner-border {
+    width: .8rem;
+    height: .8rem;
+    border-width: .15em;
+}
+
+.llm-model-chip .llm-model-badge {
+    display: inline-block;
+    max-width: 16rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: .25rem .55rem;
+    color: #055160;
+    font-size: .8125rem;
+    border: none;
+    background: transparent;
+    vertical-align: middle;
+}
+
+[data-bs-theme="dark"] .llm-model-chip {
+    border-color: #64748b;
+    background-color: #334155;
+}
+
+[data-bs-theme="dark"] .llm-model-chip .llm-check-now-btn {
+    color: #7dd3fc;
+    border-right-color: rgba(148, 163, 184, .35);
+}
+
+[data-bs-theme="dark"] .llm-model-chip .llm-check-now-btn:hover {
+    background-color: rgba(125, 211, 252, .2);
+    color: #e0f2fe;
+}
+
+[data-bs-theme="dark"] .llm-model-chip .llm-model-badge {
+    color: #e2e8f0 !important;
+    background: transparent !important;
 }
 
 .provider-child-row > td:first-child {
@@ -9298,6 +9418,34 @@ async function triggerLlmEndpointCheckNow() {
     }
 }
 
+// 手动检测单个LLM端点可用性
+async function checkSingleLlmEndpoint(endpointId, btnEl) {
+    if (!endpointId) return;
+    // 同一端点在桌面/移动端可能有多个按钮，统一置为检测中状态
+    const buttons = Array.from(document.querySelectorAll('.llm-check-now-btn'))
+        .filter(b => b.getAttribute('data-endpoint-id') === endpointId);
+    const originalHtml = [];
+    buttons.forEach((b, i) => {
+        originalHtml[i] = b.innerHTML;
+        b.disabled = true;
+        b.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+    });
+
+    try {
+        await publicApiRequest('/api/llm-endpoints/' + encodeURIComponent(endpointId) + '/check-now', { method: 'POST' });
+        if (typeof showSuccess === 'function') showSuccess('检测完成');
+        // 重新拉取最新状态并刷新列表
+        await loadAllLlmEndpointStatuses();
+    } catch (error) {
+        if (typeof showError === 'function') showError('检测失败，请稍后重试');
+        // 失败时恢复按钮（成功时列表已重渲染，按钮为新元素无需恢复）
+        buttons.forEach((b, i) => {
+            b.disabled = false;
+            b.innerHTML = originalHtml[i];
+        });
+    }
+}
+
 async function loadAllLlmEndpointStatuses() {
     try {
         let data;
@@ -9459,6 +9607,7 @@ async function renderGroupedLlmStatusTable(endpoints) {
         sortedEndpoints.forEach(ep => {
             const row = document.createElement('tr');
             row.dataset.providerKey = group.key;
+            row.dataset.endpointId = ep.id;
             row.className = 'provider-child-row ' + getLlmStatusRowClass(ep.last_status);
             row.style.display = expanded ? '' : 'none';
 
@@ -9475,7 +9624,14 @@ async function renderGroupedLlmStatusTable(endpoints) {
             historyCell.appendChild(historyContainer);
 
             row.innerHTML = \`
-                <td><span class="ms-3 badge bg-info-subtle text-dark border llm-model-badge" title="\${escapeHtml(ep.model)}">\${escapeHtml(ep.model)}</span></td>
+                <td>
+                    <span class="llm-model-chip">
+                        <button type="button" class="llm-check-now-btn" data-endpoint-id="\${escapeHtml(ep.id)}" title="立即检测该模型可用性" aria-label="立即检测该模型可用性">
+                            <i class="bi bi-arrow-repeat"></i>
+                        </button>
+                        <span class="llm-model-badge" title="\${escapeHtml(ep.model)}">\${escapeHtml(ep.model)}</span>
+                    </span>
+                </td>
                 <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
                 <td>\${ep.last_status_code || '-'}</td>
                 <td>\${responseTime}</td>
@@ -9493,6 +9649,13 @@ async function renderGroupedLlmStatusTable(endpoints) {
             const providerKey = this.getAttribute('data-provider-key');
             llmProviderExpansionState[providerKey] = !(llmProviderExpansionState[providerKey] !== false);
             renderGroupedLlmStatusTable(endpoints);
+        });
+    });
+
+    tableBody.querySelectorAll('.llm-check-now-btn').forEach(btn => {
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            checkSingleLlmEndpoint(this.getAttribute('data-endpoint-id'), this);
         });
     });
 
@@ -9540,8 +9703,13 @@ function renderGroupedMobileLlmCards(endpoints) {
             item.style.display = expanded ? '' : 'none';
             item.className = 'border-top pt-2 mt-2 ' + getLlmStatusRowClass(ep.last_status);
             item.innerHTML = \`
-                <div class="d-flex justify-content-between align-items-center">
-                    <strong>\${escapeHtml(ep.model)}</strong>
+                <div class="d-flex justify-content-between align-items-center gap-2">
+                    <span class="llm-model-chip">
+                        <button type="button" class="llm-check-now-btn" data-endpoint-id="\${escapeHtml(ep.id)}" title="立即检测该模型可用性" aria-label="立即检测该模型可用性">
+                            <i class="bi bi-arrow-repeat"></i>
+                        </button>
+                        <span class="llm-model-badge" title="\${escapeHtml(ep.model)}">\${escapeHtml(ep.model)}</span>
+                    </span>
                     <span class="badge \${statusInfo.class}">\${statusInfo.text}</span>
                 </div>
                 <div class="mt-1"><small>响应: \${responseTime} | \${lastCheckTime}</small></div>
@@ -9563,6 +9731,13 @@ function renderGroupedMobileLlmCards(endpoints) {
             const providerKey = this.getAttribute('data-provider-key');
             llmProviderExpansionState[providerKey] = !(llmProviderExpansionState[providerKey] !== false);
             renderGroupedLlmStatusTable(endpoints);
+        });
+    });
+
+    container.querySelectorAll('.llm-check-now-btn').forEach(btn => {
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            checkSingleLlmEndpoint(this.getAttribute('data-endpoint-id'), this);
         });
     });
 }
