@@ -4735,10 +4735,10 @@ function getIndexHtml() {
             align-items: center;
             justify-content: center; /* Center the bars within this container */
             height: 25px; /* Increased height */
-            gap: 2px; /* Space between bars */
+            gap: 1px; /* Space between bars (48 half-hour slots) */
         }
         .history-bar {
-            width: 8px; /* Increased width of each bar */
+            width: 6px; /* Half-hour slots (48 bars; total width intentionally wider) */
             height: 100%;
             /* margin-left: 1px; /* Replaced by gap */
             border-radius: 1px;
@@ -4809,6 +4809,14 @@ function getIndexHtml() {
             max-width: 18rem;
             overflow: hidden;
             text-overflow: ellipsis;
+            vertical-align: middle;
+        }
+        .llm-output-preview {
+            max-width: 6rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: inline-block;
             vertical-align: middle;
         }
         [data-bs-theme="dark"] .llm-model-badge {
@@ -5392,10 +5400,10 @@ function getLoginHtml() {
             align-items: center;
             justify-content: center; /* Center the bars within this container */
             height: 25px; /* Increased height */
-            gap: 2px; /* Space between bars */
+            gap: 1px; /* Space between bars (48 half-hour slots) */
         }
         .history-bar {
-            width: 8px; /* Increased width of each bar */
+            width: 6px; /* Half-hour slots (48 bars; total width intentionally wider) */
             height: 100%;
             /* margin-left: 1px; /* Replaced by gap */
             border-radius: 1px;
@@ -5466,6 +5474,14 @@ function getLoginHtml() {
             max-width: 18rem;
             overflow: hidden;
             text-overflow: ellipsis;
+            vertical-align: middle;
+        }
+        .llm-output-preview {
+            max-width: 6rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: inline-block;
             vertical-align: middle;
         }
         [data-bs-theme="dark"] .llm-model-badge {
@@ -6572,6 +6588,15 @@ body {
     max-width: 18rem;
     overflow: hidden;
     text-overflow: ellipsis;
+    vertical-align: middle;
+}
+
+.llm-output-preview {
+    max-width: 6rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
     vertical-align: middle;
 }
 
@@ -9364,41 +9389,46 @@ async function renderSiteStatusTable(sites) {
     renderMobileSiteCards(sites);
 }
 
-// Render 24h history bar for a site (unified function for PC and mobile)
+// Render 24h history bar for a site (48 half-hour slots; unified for PC and mobile)
 function renderSiteHistoryBar(containerElement, history) {
     let historyHtml = '';
     const now = new Date();
+    // Floor current time to the start of the current 30-minute half-hour
+    const currentSlotStart = new Date(now);
+    currentSlotStart.setMinutes(now.getMinutes() < 30 ? 0 : 30, 0, 0);
 
-    for (let i = 0; i < 24; i++) {
-        const slotTime = new Date(now);
-        slotTime.setHours(now.getHours() - i);
-        const slotStart = new Date(slotTime);
-        slotStart.setMinutes(0, 0, 0);
-        const slotEnd = new Date(slotTime);
-        slotEnd.setMinutes(59, 59, 999);
+    for (let i = 0; i < 48; i++) {
+        const slotStart = new Date(currentSlotStart.getTime() - i * 30 * 60 * 1000);
+        const slotEnd = new Date(slotStart.getTime() + 30 * 60 * 1000 - 1);
 
         const slotStartTimestamp = Math.floor(slotStart.getTime() / 1000);
         const slotEndTimestamp = Math.floor(slotEnd.getTime() / 1000);
 
-        const recordForHour = history?.find(
+        const recordForSlot = history?.find(
             r => r.timestamp >= slotStartTimestamp && r.timestamp <= slotEndTimestamp
         );
 
-        let barClass = 'history-bar-pending';
-        let titleText = \`\${String(slotStart.getHours()).padStart(2, '0')}:00 - \${String((slotStart.getHours() + 1) % 24).padStart(2, '0')}:00: 无记录\`;
+        const startHH = String(slotStart.getHours()).padStart(2, '0');
+        const startMM = String(slotStart.getMinutes()).padStart(2, '0');
+        const endDate = new Date(slotStart.getTime() + 30 * 60 * 1000);
+        const endHH = String(endDate.getHours()).padStart(2, '0');
+        const endMM = String(endDate.getMinutes()).padStart(2, '0');
 
-        if (recordForHour) {
-            if (recordForHour.status === 'UP') {
+        let barClass = 'history-bar-pending';
+        let titleText = \`\${startHH}:\${startMM} - \${endHH}:\${endMM}: 无记录\`;
+
+        if (recordForSlot) {
+            if (recordForSlot.status === 'UP') {
                 barClass = 'history-bar-up';
-            } else if (recordForHour.status === 'HIGH_LATENCY') {
+            } else if (recordForSlot.status === 'HIGH_LATENCY') {
                 barClass = 'history-bar-high-latency';
-            } else if (recordForHour.status === 'TIMEOUT') {
+            } else if (recordForSlot.status === 'TIMEOUT') {
                 barClass = 'history-bar-timeout';
-            } else if (['DOWN', 'ERROR'].includes(recordForHour.status)) {
+            } else if (['DOWN', 'ERROR'].includes(recordForSlot.status)) {
                 barClass = 'history-bar-down';
             }
-            const recordDate = new Date(recordForHour.timestamp * 1000);
-            titleText = \`\${recordDate.toLocaleString()}: \${recordForHour.status} (\${recordForHour.status_code || 'N/A'}), \${formatDurationSeconds(recordForHour.response_time_ms)}\`;
+            const recordDate = new Date(recordForSlot.timestamp * 1000);
+            titleText = \`\${recordDate.toLocaleString()}: \${recordForSlot.status} (\${recordForSlot.status_code || 'N/A'}), \${formatDurationSeconds(recordForSlot.response_time_ms)}\`;
         }
 
         historyHtml += \`<div class="history-bar \${barClass}" title="\${titleText}"></div>\`;
@@ -9492,7 +9522,7 @@ async function renderLlmStatusTable(endpoints) {
         const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
         const responseTime = formatDurationSeconds(ep.last_response_time_ms);
         const outputPreview = ep.last_output_preview
-            ? (ep.last_output_preview.length > 60 ? ep.last_output_preview.substring(0, 60) + '...' : ep.last_output_preview)
+            ? (ep.last_output_preview.length > 20 ? ep.last_output_preview.substring(0, 20) + '...' : ep.last_output_preview)
             : '-';
 
         const historyCell = document.createElement('td');
@@ -9507,7 +9537,7 @@ async function renderLlmStatusTable(endpoints) {
             <td>\${ep.last_status_code || '-'}</td>
             <td>\${responseTime}</td>
             <td>\${lastCheckTime}</td>
-            <td><small class="text-muted" title="\${ep.last_output_preview || ''}">\${outputPreview}</small></td>
+            <td><small class="text-muted llm-output-preview" title="\${ep.last_output_preview || ''}">\${outputPreview}</small></td>
         \`;
         row.appendChild(historyCell);
         tableBody.appendChild(row);
@@ -9615,7 +9645,7 @@ async function renderGroupedLlmStatusTable(endpoints) {
             const lastCheckTime = ep.last_checked ? new Date(ep.last_checked * 1000).toLocaleString() : '从未';
             const responseTime = formatDurationSeconds(ep.last_response_time_ms);
             const outputPreview = ep.last_output_preview
-                ? (ep.last_output_preview.length > 60 ? ep.last_output_preview.substring(0, 60) + '...' : ep.last_output_preview)
+                ? (ep.last_output_preview.length > 20 ? ep.last_output_preview.substring(0, 20) + '...' : ep.last_output_preview)
                 : '-';
 
             const historyCell = document.createElement('td');
