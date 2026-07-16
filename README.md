@@ -42,11 +42,12 @@
 ### LLM 端点可用性监控
 
 - 支持 OpenAI 兼容接口，例如：`https://api.example.com/v1/chat/completions`。
-- 支持配置 API Key、模型名称、测试 Prompt、期望包含内容和超时时间。
+- 支持配置 API Key、模型名称、测试 Prompt 和期望包含内容。
 - 支持多个模型批量添加：每行一个、逗号分隔或 JSON 数组。
 - 支持 Provider 分组；Provider 名称为空时自动取 API URL 域名，例如 `https://api.openai.com/v1/chat/completions` 会显示为 `api.openai.com`。
+- 同一 API URL 若填写不同 Provider 名称，会视为不同 Provider，模型不会聚合到同一组。
 - 状态包括：正常、高延迟、超时、故障、错误、待检测。
-- 支持 LLM 高延迟阈值和 LLM 超时阈值配置，后台输入和前台展示均使用秒 `s`。
+- 支持 LLM 高延迟阈值和全局 LLM 超时阈值配置（所有端点共用），后台输入和前台展示均使用秒 `s`。
 - 前台页面加载/刷新时会自动排队触发一次公开 LLM 端点检测。
 - 24 小时历史色块会区分高延迟、超时和故障。
 
@@ -188,11 +189,11 @@ curl -O https://raw.githubusercontent.com/aiqiji7/cf-vps-monitor/main/cf-vps-mon
 1. 后台点击添加 LLM 端点。
 2. 输入 API URL，例如：`https://api.example.com/v1/chat/completions`。
 3. 输入模型名称，支持多个模型批量添加。
-4. 可填写 API Key、测试 Prompt、期望包含内容和超时时间。
-5. Provider 名称可留空，系统会自动使用 API URL 的域名。
+4. 可填写 API Key、测试 Prompt 和期望包含内容。
+5. Provider 名称可留空，系统会自动使用 API URL 的域名；若同一 API URL 填写不同 Provider 名称，会分成不同 Provider 组。
 6. 可在 LLM 端点管理区配置：
    - LLM 高延迟阈值，单位为秒 `s`。
-   - LLM 超时阈值，单位为秒 `s`。
+   - LLM 超时阈值（全局，所有端点共用），单位为秒 `s`。
    - LLM 探测频率倍数。
 
 ## 时间单位说明
@@ -203,7 +204,6 @@ curl -O https://raw.githubusercontent.com/aiqiji7/cf-vps-monitor/main/cf-vps-mon
 - 网站高延迟阈值显示为秒。
 - LLM 高延迟阈值显示为秒。
 - LLM 超时阈值显示为秒。
-- LLM 端点超时时间显示为秒。
 
 代码内部、数据库字段和 API payload 仍使用毫秒，字段名也保留 `_ms`，这是为了兼容已有数据和检测逻辑。
 

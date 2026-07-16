@@ -628,21 +628,6 @@ async function getMonitoringThresholds(db) {
   }
 }
 
-async function getExistingProviderName(db, apiUrl) {
-  if (!apiUrl) return '';
-  try {
-    const row = await db.prepare(
-      `SELECT name FROM monitored_llm_endpoints
-       WHERE api_url = ? AND name IS NOT NULL AND TRIM(name) != ''
-       ORDER BY sort_order ASC NULLS LAST, added_at ASC
-       LIMIT 1`
-    ).bind(apiUrl).first();
-    return row?.name ? row.name.trim() : '';
-  } catch (error) {
-    return '';
-  }
-}
-
 function getDefaultProviderNameFromApiUrl(apiUrl) {
   const url = typeof apiUrl === 'string' ? apiUrl.trim() : '';
   if (!url) return '';
@@ -654,10 +639,12 @@ function getDefaultProviderNameFromApiUrl(apiUrl) {
   }
 }
 
+// Provider 名称：用户填写则原样使用；留空则用 API URL 域名。
+// 同 api_url 可对应多个不同 Provider 名称，互不继承、互不覆盖。
 async function resolveLlmProviderName(db, apiUrl, name) {
   const customName = typeof name === 'string' ? name.trim() : '';
   if (customName) return customName;
-  return (await getExistingProviderName(db, apiUrl)) || getDefaultProviderNameFromApiUrl(apiUrl);
+  return getDefaultProviderNameFromApiUrl(apiUrl);
 }
 
 function clearMonitoringSettingsCache() {
@@ -2727,7 +2714,7 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const { name, api_url, api_key, model, models, check_prompt, expected_contains, timeout_ms } = await parseJsonSafely(request);
+      const { name, api_url, api_key, model, models, check_prompt, expected_contains } = await parseJsonSafely(request);
 
       if (!api_url || !isValidHttpUrl(api_url)) {
         return new Response(JSON.stringify({ error: 'Valid API URL is required', message: '请输入有效的API URL' }), {
@@ -2745,8 +2732,9 @@ async function handleApiRequest(request, env, ctx) {
       const addedAt = Math.floor(Date.now() / 1000);
       const checkPrompt = check_prompt || 'Say hello in one word';
       const expectedContains = expected_contains || '';
+      // 超时统一使用全局 llm_timeout_ms，忽略请求体中的 timeout_ms
       const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(env.DB);
-      const timeoutMs = normalizeLlmTimeout(timeout_ms, llmHighLatencyMs, llmTimeoutMs);
+      const timeoutMs = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
       const apiKey = api_key || '';
       const providerName = await resolveLlmProviderName(env.DB, api_url, name);
 
@@ -2868,6 +2856,8 @@ async function handleApiRequest(request, env, ctx) {
       const insertStmts = [];
       const newEndpoints = [];
       const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(env.DB);
+      // 批量导入同样只使用全局超时，不接受逐端点 timeout_ms
+      const timeoutMs = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
 
       for (const ep of endpoints) {
         const endpointId = Math.random().toString(36).substring(2, 12);
@@ -2877,7 +2867,6 @@ async function handleApiRequest(request, env, ctx) {
         const model = ep.model.trim();
         const checkPrompt = ep.check_prompt || 'Say hello in one word';
         const expectedContains = ep.expected_contains || '';
-        const timeoutMs = normalizeLlmTimeout(ep.timeout_ms, llmHighLatencyMs, llmTimeoutMs);
 
         insertStmts.push(
           env.DB.prepare(`
@@ -2978,7 +2967,7 @@ async function handleApiRequest(request, env, ctx) {
         return createErrorResponse('Invalid endpoint ID', '无效的端点ID', 400, corsHeaders);
       }
 
-      const { name, api_url, api_key, model, models, check_prompt, expected_contains, timeout_ms } = await request.json();
+      const { name, api_url, api_key, model, models, check_prompt, expected_contains } = await request.json();
       if (!api_url || !api_url.trim()) {
         return createErrorResponse('Invalid API URL', 'API URL不能为空', 400, corsHeaders);
       }
@@ -2992,11 +2981,12 @@ async function handleApiRequest(request, env, ctx) {
       const apiKey = api_key || '';
       const checkPrompt = check_prompt || 'Say hello in one word';
       const expectedContains = expected_contains || '';
+      // 超时统一使用全局 llm_timeout_ms，忽略请求体中的 timeout_ms
       const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(env.DB);
-      const timeoutMs = normalizeLlmTimeout(timeout_ms, llmHighLatencyMs, llmTimeoutMs);
+      const timeoutMs = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
       const providerName = await resolveLlmProviderName(env.DB, apiUrl, name);
 
-      // 第一个模型：更新当前端点
+      // 第一个模型：更新当前端点（不按 api_url 批量改名，允许同 URL 多 Provider）
       const info = await env.DB.prepare(`
         UPDATE monitored_llm_endpoints SET name = ?, api_url = ?, api_key = ?, model = ?, check_prompt = ?, expected_contains = ?, timeout_ms = ? WHERE id = ?
       `).bind(
@@ -3004,10 +2994,6 @@ async function handleApiRequest(request, env, ctx) {
         checkPrompt, expectedContains,
         timeoutMs, endpointId
       ).run();
-
-      await env.DB.prepare(
-        'UPDATE monitored_llm_endpoints SET name = ? WHERE api_url = ?'
-      ).bind(providerName, apiUrl).run();
 
       if (info.changes === 0) {
         return createErrorResponse('Endpoint not found', '端点不存在', 404, corsHeaders);
@@ -3497,7 +3483,6 @@ async function handleApiRequest(request, env, ctx) {
 
       const effectiveMinTimeout = getEffectiveMinLlmTimeout(llmThreshold);
       let llmTimeout = currentThresholds.llmTimeoutMs;
-      let shouldLiftLowEndpointTimeouts = false;
       if (hasLlmTimeout) {
         llmTimeout = parsePositiveInteger(body.llmTimeoutMs, 0);
         if (!llmTimeout) {
@@ -3506,10 +3491,9 @@ async function handleApiRequest(request, env, ctx) {
         if (llmTimeout < effectiveMinTimeout || llmTimeout > MAX_LLM_TIMEOUT_MS) {
           return createErrorResponse('Invalid threshold', `LLM 超时阈值必须在 ${formatDurationSecondsLabel(effectiveMinTimeout)} 到 ${formatDurationSecondsLabel(MAX_LLM_TIMEOUT_MS)} 之间`, 400, corsHeaders);
         }
-      } else {
-        const previousLlmTimeout = llmTimeout;
+      } else if (hasLlmThreshold) {
+        // 仅提高高延迟阈值时，必要时抬升全局超时以满足下限
         llmTimeout = normalizeLlmTimeout(llmTimeout, llmThreshold, llmTimeout);
-        shouldLiftLowEndpointTimeouts = hasLlmThreshold && llmTimeout !== previousLlmTimeout;
       }
 
       const updateStatements = [];
@@ -3527,16 +3511,9 @@ async function handleApiRequest(request, env, ctx) {
         updateStatements.push(
           env.DB.prepare('REPLACE INTO app_config (key, value) VALUES (?, ?)').bind('llm_timeout_ms', String(llmTimeout))
         );
-      }
-      if (hasLlmTimeout) {
+        // 全局超时变更时同步所有端点行，保持 DB 与运行时一致（运行时以全局为准）
         updateStatements.push(
           env.DB.prepare('UPDATE monitored_llm_endpoints SET timeout_ms = ?').bind(llmTimeout)
-        );
-      } else if (hasLlmThreshold) {
-        updateStatements.push(
-          env.DB.prepare(
-            'UPDATE monitored_llm_endpoints SET timeout_ms = ? WHERE timeout_ms IS NULL OR timeout_ms < ?'
-          ).bind(shouldLiftLowEndpointTimeouts ? llmTimeout : effectiveMinTimeout, effectiveMinTimeout)
         );
       }
 
@@ -3980,7 +3957,7 @@ async function runLlmEndpointChecksWithLimit(endpoints, db, ctx, concurrencyLimi
 }
 
 async function checkLlmEndpointStatus(endpoint, db, ctx) {
-  const { id, name, api_url, api_key, model, check_prompt, expected_contains, timeout_ms } = endpoint;
+  const { id, name, api_url, api_key, model, check_prompt, expected_contains } = endpoint;
   const startTime = Date.now();
   let newStatus = 'PENDING';
   let newStatusCode = null;
@@ -4008,8 +3985,9 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
     // 静默处理
   }
 
+  // 请求超时仅使用全局 llm_timeout_ms，不再读取端点级 timeout_ms
   const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(db);
-  const effectiveTimeout = normalizeLlmTimeout(timeout_ms, llmHighLatencyMs, llmTimeoutMs);
+  const effectiveTimeout = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
 
   try {
     const headers = { 'Content-Type': 'application/json' };
@@ -6035,9 +6013,9 @@ function getAdminHtml() {
                                             <input type="number" class="form-control" id="llmHighLatencyMs" min="0.001" max="119.999" step="0.1" placeholder="20">
                                             <span class="input-group-text">s</span>
                                         </div>
-                                        <div class="input-group input-group-sm" style="width: 170px;">
+                                        <div class="input-group input-group-sm" style="width: 190px;">
                                             <span class="input-group-text">超时</span>
-                                            <input type="number" class="form-control" id="llmTimeoutMs" min="21" max="120" step="0.1" placeholder="45">
+                                            <input type="number" class="form-control" id="llmTimeoutMs" min="21" max="120" step="0.1" placeholder="45" title="所有 LLM 端点共用的请求超时">
                                             <span class="input-group-text">s</span>
                                         </div>
                                         <button type="button" id="saveLlmThresholdsBtn" class="btn btn-outline-warning btn-sm">保存阈值</button>
@@ -6355,11 +6333,6 @@ function getAdminHtml() {
                                 <label for="llmEndpointExpected" class="form-label">期望包含（逗号分隔，可选）</label>
                                 <input type="text" class="form-control" id="llmEndpointExpected" placeholder="例如：hello,hi,你好">
                             </div>
-                        </div>
-                        <div class="mb-3">
-                            <label for="llmEndpointTimeout" class="form-label">超时时间 (s)</label>
-                            <input type="number" class="form-control" id="llmEndpointTimeout" value="45" placeholder="45" min="21" max="120" step="0.1">
-                            <div class="form-text" id="llmEndpointTimeoutHelp">超时时间必须大于当前 LLM 高延迟阈值，建议至少高 1 秒。超过该阈值但请求成功时会标记为“高延迟”状态（仅展示）。</div>
                         </div>
                     </form>
                 </div>
@@ -8440,19 +8413,22 @@ function groupLlmEndpointsByProvider(endpoints) {
     const groupMap = new Map();
 
     endpoints.forEach((endpoint) => {
-        const key = endpoint.api_url || endpoint.id;
+        // 按 Provider 名称 + API URL 分组：同 URL 不同名称视为不同 Provider
+        const providerName = (endpoint.name || '').trim();
+        const apiUrl = endpoint.api_url || '';
+        const key = providerName
+            ? (providerName + '\0' + apiUrl)
+            : (apiUrl || endpoint.id);
         let group = groupMap.get(key);
         if (!group) {
             group = {
                 key,
                 api_url: endpoint.api_url,
-                providerName: (endpoint.name || '').trim(),
+                providerName,
                 endpoints: []
             };
             groupMap.set(key, group);
             groups.push(group);
-        } else if (endpoint.name && endpoint.name.trim()) {
-            group.providerName = endpoint.name.trim();
         }
 
         group.endpoints.push(endpoint);
@@ -10307,20 +10283,22 @@ function groupLlmEndpointsByProvider(endpoints) {
     const groupMap = new Map();
 
     endpoints.forEach((endpoint) => {
-        const key = endpoint.api_url || endpoint.id;
+        // 按 Provider 名称 + API URL 分组：同 URL 不同名称视为不同 Provider
+        const providerName = (endpoint.name || '').trim();
+        const apiUrl = endpoint.api_url || '';
+        const key = providerName
+            ? (providerName + '\0' + apiUrl)
+            : (apiUrl || endpoint.id);
         let group = groupMap.get(key);
         if (!group) {
             group = {
                 key,
                 api_url: endpoint.api_url,
-                providerName: (endpoint.name || '').trim(),
+                providerName,
                 endpoints: []
             };
             groupMap.set(key, group);
             groups.push(group);
-        }
-        if (endpoint.name && endpoint.name.trim()) {
-            group.providerName = endpoint.name.trim();
         }
         group.endpoints.push(endpoint);
     });
@@ -12162,7 +12140,6 @@ function showLlmEndpointModal(endpointIdToEdit = null) {
     form.reset();
     const modalTitle = document.getElementById('llmEndpointModalTitle');
     const endpointIdInput = document.getElementById('llmEndpointId');
-    const configuredLlmTimeout = secondsInputToMilliseconds(document.getElementById('llmTimeoutMs')?.value) || 45000;
 
     if (endpointIdToEdit) {
         const ep = llmEndpointList.find(e => e.id === endpointIdToEdit);
@@ -12175,7 +12152,6 @@ function showLlmEndpointModal(endpointIdToEdit = null) {
             document.getElementById('llmEndpointModel').value = ep.model;
             document.getElementById('llmEndpointPrompt').value = ep.check_prompt || '';
             document.getElementById('llmEndpointExpected').value = ep.expected_contains || '';
-            document.getElementById('llmEndpointTimeout').value = millisecondsToSecondsInput(ep.timeout_ms || configuredLlmTimeout);
         } else {
             showToast('danger', '未找到要编辑的端点信息');
             return;
@@ -12183,10 +12159,7 @@ function showLlmEndpointModal(endpointIdToEdit = null) {
     } else {
         modalTitle.textContent = '添加LLM端点';
         endpointIdInput.value = '';
-        document.getElementById('llmEndpointTimeout').value = millisecondsToSecondsInput(configuredLlmTimeout);
     }
-
-    updateLlmTimeoutHelp();
 
     const modal = new bootstrap.Modal(document.getElementById('llmEndpointModal'));
     modal.show();
@@ -12228,11 +12201,6 @@ async function saveLlmEndpoint() {
     const modelInput = document.getElementById('llmEndpointModel').value;
     const check_prompt = document.getElementById('llmEndpointPrompt').value.trim();
     const expected_contains = document.getElementById('llmEndpointExpected').value.trim();
-    const llmThreshold = secondsInputToMilliseconds(document.getElementById('llmHighLatencyMs')?.value) || 20000;
-    const minTimeout = Math.max(21000, llmThreshold + 1000);
-    const configuredLlmTimeout = secondsInputToMilliseconds(document.getElementById('llmTimeoutMs')?.value) || 45000;
-    const defaultTimeout = Math.min(120000, Math.max(configuredLlmTimeout, minTimeout));
-    const timeout_ms = secondsInputToMilliseconds(document.getElementById('llmEndpointTimeout').value) || defaultTimeout;
 
     if (!api_url) {
         showToast('warning', '请输入API URL');
@@ -12249,17 +12217,13 @@ async function saveLlmEndpoint() {
         return;
     }
 
-    if (timeout_ms < minTimeout || timeout_ms > 120000) {
-        showToast('warning', '超时时间必须在 ' + formatDurationSeconds(minTimeout) + ' 到 ' + formatDurationSeconds(120000) + ' 之间');
-        return;
-    }
-
+    // 超时统一使用管理页全局 LLM 超时阈值，不再按端点单独配置
     const requestBody = {
         name,
         api_url, api_key,
         model: models[0],
         models,
-        check_prompt, expected_contains, timeout_ms
+        check_prompt, expected_contains
     };
     let apiUrl = '/api/admin/llm-endpoints';
     let method = 'POST';
@@ -12383,8 +12347,6 @@ async function loadHighLatencyThresholds() {
 function updateLlmTimeoutHelp(llmThresholdMs, llmTimeoutMs, options = {}) {
     const llmInput = document.getElementById('llmHighLatencyMs');
     const llmTimeoutInput = document.getElementById('llmTimeoutMs');
-    const timeoutInput = document.getElementById('llmEndpointTimeout');
-    const timeoutHelp = document.getElementById('llmEndpointTimeoutHelp');
     const preserveLlmTimeoutInput = options.preserveLlmTimeoutInput === true;
     const threshold = llmThresholdMs
         ? (parseInt(llmThresholdMs, 10) || 20000)
@@ -12399,21 +12361,10 @@ function updateLlmTimeoutHelp(llmThresholdMs, llmTimeoutMs, options = {}) {
     if (llmTimeoutInput) {
         llmTimeoutInput.min = minTimeoutSeconds;
         llmTimeoutInput.max = '120';
+        llmTimeoutInput.title = '所有 LLM 端点共用的请求超时，须大于高延迟阈值（' + formatDurationSeconds(threshold) + '）';
         if (!preserveLlmTimeoutInput && (!llmTimeoutInput.value || secondsInputToMilliseconds(llmTimeoutInput.value) < minTimeout)) {
             llmTimeoutInput.value = millisecondsToSecondsInput(defaultTimeout);
         }
-    }
-
-    if (timeoutInput) {
-        timeoutInput.min = minTimeoutSeconds;
-        timeoutInput.max = '120';
-        if (!timeoutInput.value || secondsInputToMilliseconds(timeoutInput.value) < minTimeout) {
-            timeoutInput.value = millisecondsToSecondsInput(defaultTimeout);
-        }
-    }
-
-    if (timeoutHelp) {
-        timeoutHelp.textContent = '超时时间必须大于当前 LLM 高延迟阈值（' + formatDurationSeconds(threshold) + '），建议至少高 1 s。超过该阈值但请求成功时会标记为“高延迟”状态（仅展示）。';
     }
 }
 

@@ -43,11 +43,12 @@ This repository is a secondary-development fork based on the original project.
 ### LLM Endpoint Monitoring
 
 - Supports OpenAI-compatible endpoints such as `https://api.example.com/v1/chat/completions`.
-- Supports API key, model name, test prompt, expected-content matching, and timeout settings.
+- Supports API key, model name, test prompt, and expected-content matching.
 - Supports batch adding multiple models via newline, comma-separated text, or JSON array.
 - Supports Provider grouping. If Provider name is empty, the API URL domain is used, for example `https://api.openai.com/v1/chat/completions` becomes `api.openai.com`.
+- The same API URL with different Provider names is treated as separate Providers; models are not merged into one group.
 - Statuses include normal, high latency, timeout, down, error, and pending.
-- Supports configurable LLM high-latency threshold and LLM timeout threshold in seconds `s`.
+- Supports configurable LLM high-latency threshold and a global LLM timeout threshold (shared by all endpoints) in seconds `s`.
 - Queues one public LLM endpoint check when the frontend page loads or refreshes.
 - The 24-hour history bar distinguishes high latency, timeout, and down/error states.
 
@@ -188,11 +189,11 @@ The agent needs:
 1. Click add LLM endpoint in the admin panel.
 2. Enter API URL, such as `https://api.example.com/v1/chat/completions`.
 3. Enter one or more model names.
-4. Optionally enter API key, test prompt, expected content, and timeout.
-5. Provider name can be empty. The system will use the API URL domain automatically.
+4. Optionally enter API key, test prompt, and expected content.
+5. Provider name can be empty. The system will use the API URL domain automatically. Different Provider names on the same API URL become separate Provider groups.
 6. Configure these in the LLM management section:
    - LLM high-latency threshold in seconds `s`.
-   - LLM timeout threshold in seconds `s`.
+   - LLM timeout threshold (global, shared by all endpoints) in seconds `s`.
    - LLM check frequency multiplier.
 
 ## Time Unit Notes
@@ -203,7 +204,6 @@ The UI uses seconds `s` for:
 - Website high-latency threshold.
 - LLM high-latency threshold.
 - LLM timeout threshold.
-- LLM endpoint timeout.
 
 Internal code, database fields, and API payloads still use milliseconds. Field names such as `_ms` are intentionally preserved for compatibility.
 
