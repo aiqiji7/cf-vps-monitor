@@ -3924,14 +3924,23 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
     ctx.waitUntil(sendNotifications(db, message));
     newSiteLastNotifiedDownAt = null;
   }
-  // 批量更新数据库
+
+  const hasStatusChanged = previousStatus !== newStatus;
+
+  // 更新数据库
   try {
-    await db.batch([
-      db.prepare('UPDATE monitored_sites SET last_checked = ?, last_status = ?, last_status_code = ?, last_response_time_ms = ?, last_notified_down_at = ? WHERE id = ?')
-        .bind(checkTime, newStatus, newStatusCode, newResponseTime, newSiteLastNotifiedDownAt, id),
-      db.prepare('INSERT INTO site_status_history (site_id, timestamp, status, status_code, response_time_ms) VALUES (?, ?, ?, ?, ?)')
-        .bind(id, checkTime, newStatus, newStatusCode, newResponseTime)
-    ]);
+    const updateStmt = db.prepare('UPDATE monitored_sites SET last_checked = ?, last_status = ?, last_status_code = ?, last_response_time_ms = ?, last_notified_down_at = ? WHERE id = ?')
+      .bind(checkTime, newStatus, newStatusCode, newResponseTime, newSiteLastNotifiedDownAt, id);
+
+    if (hasStatusChanged) {
+      // 状态变化时，同时更新 sites 表和写入 history 表
+      const insertStmt = db.prepare('INSERT INTO site_status_history (site_id, timestamp, status, status_code, response_time_ms) VALUES (?, ?, ?, ?, ?)')
+        .bind(id, checkTime, newStatus, newStatusCode, newResponseTime);
+      await db.batch([updateStmt, insertStmt]);
+    } else {
+      // 状态未变化时，只更新 sites 表，跳过 history 写入以减少 D1 写入量
+      await updateStmt.run();
+    }
   } catch (dbError) {
     // 静默处理数据库更新错误
   }
@@ -4019,6 +4028,8 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
         const data = await response.json();
         // 兼容 OpenAI 格式和其他兼容格式
         const content = data?.choices?.[0]?.message?.content
+          || data?.choices?.[0]?.text
+          || data?.choices?.[0]?.delta?.content
           || data?.content?.[0]?.text
           || data?.output_text
           || null;
@@ -4081,12 +4092,18 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
 
   // 更新数据库
   try {
-    await db.batch([
-      db.prepare('UPDATE monitored_llm_endpoints SET last_checked = ?, last_status = ?, last_status_code = ?, last_response_time_ms = ?, last_output_preview = ?, last_notified_down_at = ? WHERE id = ?')
-        .bind(checkTime, newStatus, newStatusCode, newResponseTime, outputPreview, newLastNotifiedDownAt, id),
-      db.prepare('INSERT INTO llm_status_history (endpoint_id, timestamp, status, status_code, response_time_ms, output_preview) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(id, checkTime, newStatus, newStatusCode, newResponseTime, outputPreview)
-    ]);
+    const updateStmt = db.prepare('UPDATE monitored_llm_endpoints SET last_checked = ?, last_status = ?, last_status_code = ?, last_response_time_ms = ?, last_output_preview = ?, last_notified_down_at = ? WHERE id = ?')
+      .bind(checkTime, newStatus, newStatusCode, newResponseTime, outputPreview, newLastNotifiedDownAt, id);
+
+    if (hasStatusChanged) {
+      // 状态变化时，同时更新 endpoints 表和写入 history 表
+      const insertStmt = db.prepare('INSERT INTO llm_status_history (endpoint_id, timestamp, status, status_code, response_time_ms, output_preview) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(id, checkTime, newStatus, newStatusCode, newResponseTime, outputPreview);
+      await db.batch([updateStmt, insertStmt]);
+    } else {
+      // 状态未变化时，只更新 endpoints 表，跳过 history 写入以减少 D1 写入量
+      await updateStmt.run();
+    }
   } catch (dbError) {
     // 静默处理数据库更新错误
   }
