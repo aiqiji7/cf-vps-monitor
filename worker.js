@@ -135,6 +135,9 @@ const DEFAULT_LLM_TIMEOUT_MS = 45000;       // LLM 默认超时
 const MIN_LLM_TIMEOUT_MS = 21000;           // LLM 默认超时下限，实际下限需高于高延迟阈值
 const MIN_LLM_TIMEOUT_BUFFER_MS = 1000;     // LLM 超时需至少比高延迟阈值多 1 秒
 const MAX_LLM_TIMEOUT_MS = 120000;          // LLM 超时上限
+const DEFAULT_LLM_CHECK_MAX_TOKENS = 200;   // LLM 探测请求默认 max_tokens，需覆盖推理模型的输出预算
+const MIN_LLM_CHECK_MAX_TOKENS = 16;        // max_tokens 可配置下限
+const MAX_LLM_CHECK_MAX_TOKENS = 4096;      // max_tokens 可配置上限
 
 function parsePositiveInteger(value, fallback) {
   const parsed = parseInt(value, 10);
@@ -246,7 +249,7 @@ class ConfigCache {
     if (cached) return cached;
 
     const settings = await db.prepare(
-      'SELECT key, value FROM app_config WHERE key IN ("vps_report_interval_seconds", "llm_check_interval", "website_high_latency_ms", "llm_high_latency_ms", "llm_timeout_ms")'
+      'SELECT key, value FROM app_config WHERE key IN ("vps_report_interval_seconds", "llm_check_interval", "website_high_latency_ms", "llm_high_latency_ms", "llm_timeout_ms", "llm_check_max_tokens")'
     ).all();
 
     if (settings?.results) {
@@ -617,13 +620,15 @@ async function getMonitoringThresholds(db) {
     return {
       websiteHighLatencyMs: parsePositiveInteger(settingsMap.get('website_high_latency_ms'), WEBSITE_HIGH_LATENCY_MS),
       llmHighLatencyMs,
-      llmTimeoutMs: normalizeLlmTimeout(settingsMap.get('llm_timeout_ms'), llmHighLatencyMs, DEFAULT_LLM_TIMEOUT_MS)
+      llmTimeoutMs: normalizeLlmTimeout(settingsMap.get('llm_timeout_ms'), llmHighLatencyMs, DEFAULT_LLM_TIMEOUT_MS),
+      llmMaxTokens: Math.min(MAX_LLM_CHECK_MAX_TOKENS, Math.max(MIN_LLM_CHECK_MAX_TOKENS, parsePositiveInteger(settingsMap.get('llm_check_max_tokens'), DEFAULT_LLM_CHECK_MAX_TOKENS)))
     };
   } catch (error) {
     return {
       websiteHighLatencyMs: WEBSITE_HIGH_LATENCY_MS,
       llmHighLatencyMs: LLM_HIGH_LATENCY_MS,
-      llmTimeoutMs: DEFAULT_LLM_TIMEOUT_MS
+      llmTimeoutMs: DEFAULT_LLM_TIMEOUT_MS,
+      llmMaxTokens: DEFAULT_LLM_CHECK_MAX_TOKENS
     };
   }
 }
@@ -1031,7 +1036,8 @@ const D1_SCHEMAS = {
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_check_interval', '1');
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('website_high_latency_ms', '3000');
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_high_latency_ms', '20000');
-    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_timeout_ms', '${DEFAULT_LLM_TIMEOUT_MS}');`,
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_timeout_ms', '${DEFAULT_LLM_TIMEOUT_MS}');
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_check_max_tokens', '${DEFAULT_LLM_CHECK_MAX_TOKENS}');`,
 
   monitored_llm_endpoints: `
     CREATE TABLE IF NOT EXISTS monitored_llm_endpoints (
@@ -1123,7 +1129,8 @@ async function applySchemaAlterations(db) {
     await db.batch([
       db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('website_high_latency_ms', String(WEBSITE_HIGH_LATENCY_MS)),
       db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_high_latency_ms', String(LLM_HIGH_LATENCY_MS)),
-      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_timeout_ms', String(DEFAULT_LLM_TIMEOUT_MS))
+      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_timeout_ms', String(DEFAULT_LLM_TIMEOUT_MS)),
+      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_check_max_tokens', String(DEFAULT_LLM_CHECK_MAX_TOKENS))
     ]);
   } catch (e) {
     // 静默处理（app_config 表可能尚未创建）
@@ -3422,6 +3429,54 @@ async function handleApiRequest(request, env, ctx) {
     }
   }
 
+  // 获取LLM探测max_tokens设置
+  if (path === '/api/admin/settings/llm-check-max-tokens' && method === 'GET') {
+    try {
+      const thresholds = await getMonitoringThresholds(env.DB);
+      return new Response(JSON.stringify({ maxTokens: thresholds.llmMaxTokens }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({ maxTokens: DEFAULT_LLM_CHECK_MAX_TOKENS }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+  // 设置LLM探测max_tokens（管理员）
+  if (path === '/api/admin/settings/llm-check-max-tokens' && method === 'POST') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const { maxTokens } = await request.json();
+      if (typeof maxTokens !== 'number' || !Number.isInteger(maxTokens) || maxTokens < MIN_LLM_CHECK_MAX_TOKENS || maxTokens > MAX_LLM_CHECK_MAX_TOKENS) {
+        return new Response(JSON.stringify({
+          error: `Invalid maxTokens value. Must be an integer between ${MIN_LLM_CHECK_MAX_TOKENS} and ${MAX_LLM_CHECK_MAX_TOKENS}.`
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
+      }
+
+      await env.DB.prepare('REPLACE INTO app_config (key, value) VALUES (?, ?)').bind(
+        'llm_check_max_tokens',
+        maxTokens.toString()
+      ).run();
+
+      // 清除监控设置缓存，使新值立即生效
+      clearMonitoringSettingsCache();
+
+      return new Response(JSON.stringify({ success: true, maxTokens }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
   // 获取高延迟阈值设置（管理员）
   if (path === '/api/admin/settings/high-latency-thresholds' && method === 'GET') {
     const user = await authenticateRequest(request, env);
@@ -3995,7 +4050,7 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
   }
 
   // 请求超时仅使用全局 llm_timeout_ms，不再读取端点级 timeout_ms
-  const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(db);
+  const { llmHighLatencyMs, llmTimeoutMs, llmMaxTokens } = await getMonitoringThresholds(db);
   const effectiveTimeout = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
 
   try {
@@ -4008,7 +4063,7 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
     const body = JSON.stringify({
       model: model,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 50,
+      max_tokens: llmMaxTokens,
       stream: false
     });
 
@@ -4049,8 +4104,16 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
           }
         } else {
           // API 返回 200 但无有效内容
-          outputPreview = JSON.stringify(data).substring(0, 200);
-          newStatus = 'DOWN';
+          const finishReason = data?.choices?.[0]?.finish_reason;
+          const reasoningContent = data?.choices?.[0]?.message?.reasoning_content || data?.choices?.[0]?.reasoning_content;
+          if (finishReason === 'length' && typeof reasoningContent === 'string' && reasoningContent.trim()) {
+            // 推理模型把 max_tokens 预算耗在推理过程上，端点本身可用，降级为 HIGH_LATENCY 避免误报故障
+            outputPreview = reasoningContent.substring(0, 200);
+            newStatus = 'HIGH_LATENCY';
+          } else {
+            outputPreview = JSON.stringify(data).substring(0, 200);
+            newStatus = 'DOWN';
+          }
         }
       } catch (parseError) {
         outputPreview = 'Response parse error';
