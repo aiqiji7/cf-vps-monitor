@@ -135,7 +135,9 @@ const DEFAULT_LLM_TIMEOUT_MS = 45000;       // LLM 默认超时
 const MIN_LLM_TIMEOUT_MS = 21000;           // LLM 默认超时下限，实际下限需高于高延迟阈值
 const MIN_LLM_TIMEOUT_BUFFER_MS = 1000;     // LLM 超时需至少比高延迟阈值多 1 秒
 const MAX_LLM_TIMEOUT_MS = 120000;          // LLM 超时上限
-const DEFAULT_LLM_CHECK_MAX_TOKENS = 200;   // LLM 探测请求默认 max_tokens，需覆盖推理模型的输出预算
+const DEFAULT_LLM_CHECK_MAX_TOKENS = 512;   // LLM 探测请求默认 max_tokens，需覆盖推理模型的输出预算
+const DEFAULT_LLM_CHECK_PROMPT = 'Say hello in one word'; // 全局统一 LLM 探测 Prompt（覆盖所有端点）
+const DEFAULT_LLM_EXPECTED_CONTAINS = '';   // 全局统一 LLM 期望包含（逗号分隔，可空）
 const MIN_LLM_CHECK_MAX_TOKENS = 16;        // max_tokens 可配置下限
 const MAX_LLM_CHECK_MAX_TOKENS = 4096;      // max_tokens 可配置上限
 
@@ -249,7 +251,7 @@ class ConfigCache {
     if (cached) return cached;
 
     const settings = await db.prepare(
-      'SELECT key, value FROM app_config WHERE key IN ("vps_report_interval_seconds", "llm_check_interval", "website_high_latency_ms", "llm_high_latency_ms", "llm_timeout_ms", "llm_check_max_tokens")'
+      'SELECT key, value FROM app_config WHERE key IN ("vps_report_interval_seconds", "llm_check_interval", "website_high_latency_ms", "llm_high_latency_ms", "llm_timeout_ms", "llm_check_max_tokens", "llm_check_prompt", "llm_expected_contains")'
     ).all();
 
     if (settings?.results) {
@@ -621,14 +623,18 @@ async function getMonitoringThresholds(db) {
       websiteHighLatencyMs: parsePositiveInteger(settingsMap.get('website_high_latency_ms'), WEBSITE_HIGH_LATENCY_MS),
       llmHighLatencyMs,
       llmTimeoutMs: normalizeLlmTimeout(settingsMap.get('llm_timeout_ms'), llmHighLatencyMs, DEFAULT_LLM_TIMEOUT_MS),
-      llmMaxTokens: Math.min(MAX_LLM_CHECK_MAX_TOKENS, Math.max(MIN_LLM_CHECK_MAX_TOKENS, parsePositiveInteger(settingsMap.get('llm_check_max_tokens'), DEFAULT_LLM_CHECK_MAX_TOKENS)))
+      llmMaxTokens: Math.min(MAX_LLM_CHECK_MAX_TOKENS, Math.max(MIN_LLM_CHECK_MAX_TOKENS, parsePositiveInteger(settingsMap.get('llm_check_max_tokens'), DEFAULT_LLM_CHECK_MAX_TOKENS))),
+      llmCheckPrompt: (settingsMap.get('llm_check_prompt') || '').trim() || DEFAULT_LLM_CHECK_PROMPT,
+      llmExpectedContains: (settingsMap.get('llm_expected_contains') || '').trim()
     };
   } catch (error) {
     return {
       websiteHighLatencyMs: WEBSITE_HIGH_LATENCY_MS,
       llmHighLatencyMs: LLM_HIGH_LATENCY_MS,
       llmTimeoutMs: DEFAULT_LLM_TIMEOUT_MS,
-      llmMaxTokens: DEFAULT_LLM_CHECK_MAX_TOKENS
+      llmMaxTokens: DEFAULT_LLM_CHECK_MAX_TOKENS,
+      llmCheckPrompt: DEFAULT_LLM_CHECK_PROMPT,
+      llmExpectedContains: DEFAULT_LLM_EXPECTED_CONTAINS
     };
   }
 }
@@ -1037,7 +1043,9 @@ const D1_SCHEMAS = {
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('website_high_latency_ms', '3000');
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_high_latency_ms', '20000');
     INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_timeout_ms', '${DEFAULT_LLM_TIMEOUT_MS}');
-    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_check_max_tokens', '${DEFAULT_LLM_CHECK_MAX_TOKENS}');`,
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_check_max_tokens', '${DEFAULT_LLM_CHECK_MAX_TOKENS}');
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_check_prompt', '${DEFAULT_LLM_CHECK_PROMPT}');
+    INSERT OR IGNORE INTO app_config (key, value) VALUES ('llm_expected_contains', '${DEFAULT_LLM_EXPECTED_CONTAINS}');`,
 
   monitored_llm_endpoints: `
     CREATE TABLE IF NOT EXISTS monitored_llm_endpoints (
@@ -1130,7 +1138,9 @@ async function applySchemaAlterations(db) {
       db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('website_high_latency_ms', String(WEBSITE_HIGH_LATENCY_MS)),
       db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_high_latency_ms', String(LLM_HIGH_LATENCY_MS)),
       db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_timeout_ms', String(DEFAULT_LLM_TIMEOUT_MS)),
-      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_check_max_tokens', String(DEFAULT_LLM_CHECK_MAX_TOKENS))
+      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_check_max_tokens', String(DEFAULT_LLM_CHECK_MAX_TOKENS)),
+      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_check_prompt', String(DEFAULT_LLM_CHECK_PROMPT)),
+      db.prepare('INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)').bind('llm_expected_contains', String(DEFAULT_LLM_EXPECTED_CONTAINS))
     ]);
   } catch (e) {
     // 静默处理（app_config 表可能尚未创建）
@@ -2737,11 +2747,11 @@ async function handleApiRequest(request, env, ctx) {
       }
 
       const addedAt = Math.floor(Date.now() / 1000);
-      const checkPrompt = check_prompt || 'Say hello in one word';
-      const expectedContains = expected_contains || '';
-      // 超时统一使用全局 llm_timeout_ms，忽略请求体中的 timeout_ms
-      const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(env.DB);
+      // 超时/Prompt/期望包含统一使用全局设置，忽略请求体中的逐端点值
+      const { llmHighLatencyMs, llmTimeoutMs, llmCheckPrompt, llmExpectedContains } = await getMonitoringThresholds(env.DB);
       const timeoutMs = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
+      const checkPrompt = llmCheckPrompt;
+      const expectedContains = llmExpectedContains;
       const apiKey = api_key || '';
       const providerName = await resolveLlmProviderName(env.DB, api_url, name);
 
@@ -2862,8 +2872,8 @@ async function handleApiRequest(request, env, ctx) {
       const addedAt = Math.floor(Date.now() / 1000);
       const insertStmts = [];
       const newEndpoints = [];
-      const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(env.DB);
-      // 批量导入同样只使用全局超时，不接受逐端点 timeout_ms
+      const { llmHighLatencyMs, llmTimeoutMs, llmCheckPrompt, llmExpectedContains } = await getMonitoringThresholds(env.DB);
+      // 批量导入同样只使用全局超时/Prompt/期望包含，不接受逐端点值
       const timeoutMs = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
 
       for (const ep of endpoints) {
@@ -2872,8 +2882,8 @@ async function handleApiRequest(request, env, ctx) {
         const providerName = await resolveLlmProviderName(env.DB, apiUrl, ep.name);
         const apiKey = ep.api_key || '';
         const model = ep.model.trim();
-        const checkPrompt = ep.check_prompt || 'Say hello in one word';
-        const expectedContains = ep.expected_contains || '';
+        const checkPrompt = llmCheckPrompt;
+        const expectedContains = llmExpectedContains;
 
         insertStmts.push(
           env.DB.prepare(`
@@ -2986,11 +2996,11 @@ async function handleApiRequest(request, env, ctx) {
 
       const apiUrl = api_url.trim();
       const apiKey = api_key || '';
-      const checkPrompt = check_prompt || 'Say hello in one word';
-      const expectedContains = expected_contains || '';
-      // 超时统一使用全局 llm_timeout_ms，忽略请求体中的 timeout_ms
-      const { llmHighLatencyMs, llmTimeoutMs } = await getMonitoringThresholds(env.DB);
+      // Prompt/期望包含/超时统一使用全局设置，忽略请求体中的逐端点值
+      const { llmHighLatencyMs, llmTimeoutMs, llmCheckPrompt, llmExpectedContains } = await getMonitoringThresholds(env.DB);
       const timeoutMs = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
+      const checkPrompt = llmCheckPrompt;
+      const expectedContains = llmExpectedContains;
       const providerName = await resolveLlmProviderName(env.DB, apiUrl, name);
 
       // 第一个模型：更新当前端点（不按 api_url 批量改名，允许同 URL 多 Provider）
@@ -3470,6 +3480,55 @@ async function handleApiRequest(request, env, ctx) {
       clearMonitoringSettingsCache();
 
       return new Response(JSON.stringify({ success: true, maxTokens }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      return createErrorResponse('Internal server error', error.message, 500, corsHeaders);
+    }
+  }
+
+  // 获取全局LLM探测Prompt/期望包含设置（管理员）
+  if (path === '/api/admin/settings/llm-check-prompt' && method === 'GET') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const { llmCheckPrompt, llmExpectedContains } = await getMonitoringThresholds(env.DB);
+      return new Response(JSON.stringify({ checkPrompt: llmCheckPrompt, expectedContains: llmExpectedContains }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({ checkPrompt: DEFAULT_LLM_CHECK_PROMPT, expectedContains: DEFAULT_LLM_EXPECTED_CONTAINS }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+  }
+
+  // 设置全局LLM探测Prompt/期望包含（管理员）
+  if (path === '/api/admin/settings/llm-check-prompt' && method === 'POST') {
+    const user = await authenticateRequest(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
+    try {
+      const { checkPrompt, expectedContains } = await parseJsonSafely(request);
+      const prompt = (typeof checkPrompt === 'string' ? checkPrompt.trim() : '') || DEFAULT_LLM_CHECK_PROMPT;
+      const expected = (typeof expectedContains === 'string' ? expectedContains.trim() : '') || '';
+
+      await env.DB.batch([
+        env.DB.prepare('REPLACE INTO app_config (key, value) VALUES (?, ?)').bind('llm_check_prompt', prompt),
+        env.DB.prepare('REPLACE INTO app_config (key, value) VALUES (?, ?)').bind('llm_expected_contains', expected),
+        // 全局 Prompt/期望包含变更时同步所有端点行，保持 DB 与运行时一致（运行时以全局为准）
+        env.DB.prepare('UPDATE monitored_llm_endpoints SET check_prompt = ?, expected_contains = ?').bind(prompt, expected)
+      ]);
+
+      // 清除监控设置缓存，使新值立即生效
+      clearMonitoringSettingsCache();
+
+      return new Response(JSON.stringify({ success: true, checkPrompt: prompt, expectedContains: expected }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     } catch (error) {
@@ -4021,7 +4080,7 @@ async function runLlmEndpointChecksWithLimit(endpoints, db, ctx, concurrencyLimi
 }
 
 async function checkLlmEndpointStatus(endpoint, db, ctx) {
-  const { id, name, api_url, api_key, model, check_prompt, expected_contains } = endpoint;
+  const { id, name, api_url, api_key, model } = endpoint;
   const startTime = Date.now();
   let newStatus = 'PENDING';
   let newStatusCode = null;
@@ -4049,8 +4108,8 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
     // 静默处理
   }
 
-  // 请求超时仅使用全局 llm_timeout_ms，不再读取端点级 timeout_ms
-  const { llmHighLatencyMs, llmTimeoutMs, llmMaxTokens } = await getMonitoringThresholds(db);
+  // 超时/Prompt/期望包含统一使用全局设置，不再读取端点级字段
+  const { llmHighLatencyMs, llmTimeoutMs, llmMaxTokens, llmCheckPrompt, llmExpectedContains } = await getMonitoringThresholds(db);
   const effectiveTimeout = normalizeLlmTimeout(llmTimeoutMs, llmHighLatencyMs, llmTimeoutMs);
 
   try {
@@ -4059,7 +4118,7 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
       headers['Authorization'] = `Bearer ${api_key}`;
     }
 
-    const prompt = check_prompt || 'Say hello in one word';
+    const prompt = llmCheckPrompt;
     const body = JSON.stringify({
       model: model,
       messages: [{ role: 'user', content: prompt }],
@@ -4092,9 +4151,9 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
         if (content) {
           outputPreview = content.substring(0, 200);
 
-          // 检查期望内容
-          if (expected_contains) {
-            const patterns = expected_contains.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
+          // 检查期望内容（全局设置）
+          if (llmExpectedContains) {
+            const patterns = llmExpectedContains.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
             const contentLower = content.toLowerCase();
             const matched = patterns.some(p => contentLower.includes(p));
             // 可用：响应过慢则单独标记为 HIGH_LATENCY，仅展示不触发故障通知
@@ -6102,6 +6161,23 @@ function getAdminHtml() {
                                     </div>
                                 </div>
                             </form>
+                            <form id="llmCheckPromptForm" class="admin-settings-form me-2" onsubmit="return false;">
+                                <div class="settings-group">
+                                    <label class="form-label mb-0">测试 Prompt / 期望包含:</label>
+                                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                                        <div class="input-group input-group-sm" style="width: 260px;">
+                                            <span class="input-group-text">Prompt</span>
+                                            <input type="text" class="form-control" id="llmCheckPrompt" placeholder="Say hello in one word" title="所有 LLM 端点共用的探测 Prompt">
+                                        </div>
+                                        <div class="input-group input-group-sm" style="width: 260px;">
+                                            <span class="input-group-text">期望包含</span>
+                                            <input type="text" class="form-control" id="llmExpectedContains" placeholder="hello,hi,你好（逗号分隔，可选）" title="所有 LLM 端点共用的期望包含，逗号分隔，可空">
+                                        </div>
+                                        <button type="button" id="saveLlmCheckPromptBtn" class="btn btn-outline-warning btn-sm">保存</button>
+                                    </div>
+                                    <small class="text-muted">全局统一设置，覆盖所有 LLM 端点。</small>
+                                </div>
+                            </form>
                             <div class="admin-actions-group desktop-only">
                                 <button id="addLlmEndpointBtn" class="btn btn-success">
                                     <i class="bi bi-plus-circle"></i> 添加LLM端点
@@ -6394,7 +6470,7 @@ function getAdminHtml() {
                         <div class="mb-3">
                             <label for="llmEndpointModel" class="form-label">模型名称 *</label>
                             <textarea class="form-control" id="llmEndpointModel" rows="3" placeholder="支持多个模型：每行一个、逗号分隔或 JSON 数组均可&#10;例如：gpt-4o-mini, deepseek-chat, claude-sonnet-4-5-20250929" required></textarea>
-                            <div class="form-text">支持多个模型：每行一个、逗号分隔或 JSON 数组如 <code>["model-a","model-b"]</code>。同一个 API URL/Key/Prompt/Timeout 会应用到所有模型。</div>
+                            <div class="form-text">支持多个模型：每行一个、逗号分隔或 JSON 数组如 <code>["model-a","model-b"]</code>。同一个 API URL/Key/Timeout 会应用到所有模型；测试 Prompt 与期望包含在下方全局设置中统一配置。</div>
                         </div>
                         <div class="mb-3">
                             <label for="llmEndpointUrl" class="form-label">API URL *</label>
@@ -6403,16 +6479,6 @@ function getAdminHtml() {
                         <div class="mb-3">
                             <label for="llmEndpointApiKey" class="form-label">API Key（可选）</label>
                             <input type="password" class="form-control" id="llmEndpointApiKey" placeholder="sk-...">
-                        </div>
-                        <div class="row">
-                            <div class="col-md-6 mb-3">
-                                <label for="llmEndpointPrompt" class="form-label">测试 Prompt</label>
-                                <input type="text" class="form-control" id="llmEndpointPrompt" placeholder="默认: Say hello in one word">
-                            </div>
-                            <div class="col-md-6 mb-3">
-                                <label for="llmEndpointExpected" class="form-label">期望包含（逗号分隔，可选）</label>
-                                <input type="text" class="form-control" id="llmEndpointExpected" placeholder="例如：hello,hi,你好">
-                            </div>
                         </div>
                     </form>
                 </div>
@@ -10765,6 +10831,10 @@ function initEventListeners() {
         saveLlmThresholds();
     });
 
+    document.getElementById('saveLlmCheckPromptBtn').addEventListener('click', function() {
+        saveLlmCheckPrompt();
+    });
+
     document.getElementById('llmHighLatencyMs').addEventListener('input', function() {
         updateLlmTimeoutHelp(undefined, undefined, { preserveLlmTimeoutInput: true });
     });
@@ -10776,6 +10846,8 @@ function initEventListeners() {
     // 加载LLM检查频率设置
     loadLlmCheckInterval();
     loadHighLatencyThresholds();
+    loadLlmCheckPrompt();
+
 
     // 保存Telegram设置按钮
     document.getElementById('saveTelegramSettingsBtn').addEventListener('click', function() {
@@ -12249,8 +12321,6 @@ function showLlmEndpointModal(endpointIdToEdit = null) {
             document.getElementById('llmEndpointUrl').value = ep.api_url;
             document.getElementById('llmEndpointApiKey').value = ep.api_key || '';
             document.getElementById('llmEndpointModel').value = ep.model;
-            document.getElementById('llmEndpointPrompt').value = ep.check_prompt || '';
-            document.getElementById('llmEndpointExpected').value = ep.expected_contains || '';
         } else {
             showToast('danger', '未找到要编辑的端点信息');
             return;
@@ -12298,8 +12368,6 @@ async function saveLlmEndpoint() {
     const api_url = document.getElementById('llmEndpointUrl').value.trim();
     const api_key = document.getElementById('llmEndpointApiKey').value.trim();
     const modelInput = document.getElementById('llmEndpointModel').value;
-    const check_prompt = document.getElementById('llmEndpointPrompt').value.trim();
-    const expected_contains = document.getElementById('llmEndpointExpected').value.trim();
 
     if (!api_url) {
         showToast('warning', '请输入API URL');
@@ -12316,13 +12384,12 @@ async function saveLlmEndpoint() {
         return;
     }
 
-    // 超时统一使用管理页全局 LLM 超时阈值，不再按端点单独配置
+    // 超时/Prompt/期望包含统一使用管理页全局设置，不再按端点单独配置
     const requestBody = {
         name,
         api_url, api_key,
         model: models[0],
-        models,
-        check_prompt, expected_contains
+        models
     };
     let apiUrl = '/api/admin/llm-endpoints';
     let method = 'POST';
@@ -12525,6 +12592,48 @@ async function saveLlmThresholds() {
         showToast('success', 'LLM 阈值已更新');
     } catch (error) {
         showToast('danger', '保存 LLM 阈值失败: ' + error.message);
+    }
+}
+
+async function loadLlmCheckPrompt() {
+    try {
+        const data = await apiRequest('/api/admin/settings/llm-check-prompt');
+        const promptInput = document.getElementById('llmCheckPrompt');
+        const expectedInput = document.getElementById('llmExpectedContains');
+        if (promptInput) {
+            promptInput.value = data?.checkPrompt || '';
+        }
+        if (expectedInput) {
+            expectedInput.value = data?.expectedContains || '';
+        }
+    } catch (error) {
+        // 静默处理
+    }
+}
+
+async function saveLlmCheckPrompt() {
+    const promptInput = document.getElementById('llmCheckPrompt');
+    const expectedInput = document.getElementById('llmExpectedContains');
+    if (!promptInput || !expectedInput) {
+        return;
+    }
+
+    const checkPrompt = promptInput.value.trim();
+    if (!checkPrompt) {
+        showToast('warning', '测试 Prompt 不能为空');
+        return;
+    }
+
+    try {
+        const result = await apiRequest('/api/admin/settings/llm-check-prompt', {
+            method: 'POST',
+            body: JSON.stringify({ checkPrompt, expectedContains: expectedInput.value.trim() })
+        });
+        promptInput.value = result?.checkPrompt || checkPrompt;
+        expectedInput.value = result?.expectedContains || expectedInput.value.trim();
+        showToast('success', 'LLM 探测 Prompt / 期望包含已更新，已应用于所有端点');
+    } catch (error) {
+        showToast('danger', '保存失败: ' + error.message);
     }
 }
 

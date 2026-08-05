@@ -43,7 +43,8 @@ This repository is a secondary-development fork based on the original project.
 ### LLM Endpoint Monitoring
 
 - Supports OpenAI-compatible endpoints such as `https://api.example.com/v1/chat/completions`.
-- Supports API key, model name, test prompt, and expected-content matching.
+- Supports API key and model name configuration.
+- Test prompt and expected-content matching are global settings shared by all endpoints (one configuration covers all models), configured in the LLM management section.
 - Supports batch adding multiple models via newline, comma-separated text, or JSON array.
 - Supports Provider grouping. If Provider name is empty, the API URL domain is used, for example `https://api.openai.com/v1/chat/completions` becomes `api.openai.com`.
 - The same API URL with different Provider names is treated as separate Providers; models are not merged into one group.
@@ -189,12 +190,13 @@ The agent needs:
 1. Click add LLM endpoint in the admin panel.
 2. Enter API URL, such as `https://api.example.com/v1/chat/completions`.
 3. Enter one or more model names.
-4. Optionally enter API key, test prompt, and expected content.
+4. Optionally enter an API key. Test prompt and expected content are global settings configured in the LLM management section (shared by all endpoints).
 5. Provider name can be empty. The system will use the API URL domain automatically. Different Provider names on the same API URL become separate Provider groups.
 6. Configure these in the LLM management section:
    - LLM high-latency threshold in seconds `s`.
    - LLM timeout threshold (global, shared by all endpoints) in seconds `s`.
    - LLM check frequency multiplier.
+   - Test prompt and expected-content matching (global, shared by all endpoints; one configuration covers all models).
 
 ## Time Unit Notes
 

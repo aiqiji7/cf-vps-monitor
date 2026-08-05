@@ -42,7 +42,8 @@
 ### LLM 端点可用性监控
 
 - 支持 OpenAI 兼容接口，例如：`https://api.example.com/v1/chat/completions`。
-- 支持配置 API Key、模型名称、测试 Prompt 和期望包含内容。
+- 支持配置 API Key 和模型名称。
+- 测试 Prompt 与期望包含内容为全局设置（所有端点共用，一次配置覆盖所有模型），在后台 LLM 端点管理区统一配置。
 - 支持多个模型批量添加：每行一个、逗号分隔或 JSON 数组。
 - 支持 Provider 分组；Provider 名称为空时自动取 API URL 域名，例如 `https://api.openai.com/v1/chat/completions` 会显示为 `api.openai.com`。
 - 同一 API URL 若填写不同 Provider 名称，会视为不同 Provider，模型不会聚合到同一组。
@@ -189,12 +190,13 @@ curl -O https://raw.githubusercontent.com/aiqiji7/cf-vps-monitor/main/cf-vps-mon
 1. 后台点击添加 LLM 端点。
 2. 输入 API URL，例如：`https://api.example.com/v1/chat/completions`。
 3. 输入模型名称，支持多个模型批量添加。
-4. 可填写 API Key、测试 Prompt 和期望包含内容。
+4. 可填写 API Key；测试 Prompt 和期望包含内容为全局设置，在 LLM 端点管理区统一配置（所有端点共用）。
 5. Provider 名称可留空，系统会自动使用 API URL 的域名；若同一 API URL 填写不同 Provider 名称，会分成不同 Provider 组。
 6. 可在 LLM 端点管理区配置：
    - LLM 高延迟阈值，单位为秒 `s`。
    - LLM 超时阈值（全局，所有端点共用），单位为秒 `s`。
    - LLM 探测频率倍数。
+   - 测试 Prompt 与期望包含（全局，所有端点共用，一次设置覆盖所有模型）。
 
 ## 时间单位说明
 
