@@ -9133,7 +9133,7 @@ function renderMobileSiteCards(sites) {
 
         // 使用统一的历史记录渲染函数
         const historyBarContainer = historyContainer.querySelector('.history-bar-container');
-        renderSiteHistoryBar(historyBarContainer, site.history || []);
+        renderSiteHistoryBar(historyBarContainer, site.history || [], site.last_status);
 
         // 组装卡片
         card.appendChild(cardHeader);
@@ -9375,7 +9375,7 @@ async function renderSiteStatusTable(sites) {
         tableBody.appendChild(row);
 
         // 直接使用站点的历史数据渲染历史条
-        renderSiteHistoryBar(historyContainer, site.history || []);
+        renderSiteHistoryBar(historyContainer, site.history || [], site.last_status);
     }
 
     // 同时渲染移动端卡片
@@ -9383,12 +9383,29 @@ async function renderSiteStatusTable(sites) {
 }
 
 // Render 24h history bar for a site (48 half-hour slots; unified for PC and mobile)
-function renderSiteHistoryBar(containerElement, history) {
+// 前向填充：history 只记录状态"变化"时刻，因此每个槽位取该槽位结束时刻之前
+// 最近一条变化记录作为该时段状态；若 24h 内完全没有变化记录，说明状态恒定，
+// 整条色带使用当前状态（currentStatus）填充。
+function renderSiteHistoryBar(containerElement, history, currentStatus) {
     let historyHtml = '';
     const now = new Date();
     // Floor current time to the start of the current 30-minute half-hour
     const currentSlotStart = new Date(now);
     currentSlotStart.setMinutes(now.getMinutes() < 30 ? 0 : 30, 0, 0);
+
+    // 确保按时间降序，find() 即可取到"不晚于某时刻"的最新一条记录
+    const records = [...(history || [])].sort((a, b) => b.timestamp - a.timestamp);
+    const hasAnyRecord = records.length > 0;
+    // 24h内无任何记录时才可用当前状态回填（状态恒定推导）
+    const fallbackStatus = ['UP', 'HIGH_LATENCY', 'TIMEOUT', 'DOWN', 'ERROR'].includes(currentStatus) ? currentStatus : null;
+
+    const statusBarClass = (status) => {
+        if (status === 'UP') return 'history-bar-up';
+        if (status === 'HIGH_LATENCY') return 'history-bar-high-latency';
+        if (status === 'TIMEOUT') return 'history-bar-timeout';
+        if (status === 'DOWN' || status === 'ERROR') return 'history-bar-down';
+        return 'history-bar-pending';
+    };
 
     for (let i = 0; i < 48; i++) {
         const slotStart = new Date(currentSlotStart.getTime() - i * 30 * 60 * 1000);
@@ -9397,9 +9414,8 @@ function renderSiteHistoryBar(containerElement, history) {
         const slotStartTimestamp = Math.floor(slotStart.getTime() / 1000);
         const slotEndTimestamp = Math.floor(slotEnd.getTime() / 1000);
 
-        const recordForSlot = history?.find(
-            r => r.timestamp >= slotStartTimestamp && r.timestamp <= slotEndTimestamp
-        );
+        // 前向填充：取不晚于本槽位结束时刻的最新一条状态变化记录
+        const recordForSlot = records.find(r => r.timestamp <= slotEndTimestamp);
 
         const startHH = String(slotStart.getHours()).padStart(2, '0');
         const startMM = String(slotStart.getMinutes()).padStart(2, '0');
@@ -9411,17 +9427,20 @@ function renderSiteHistoryBar(containerElement, history) {
         let titleText = \`\${startHH}:\${startMM} - \${endHH}:\${endMM}: 无记录\`;
 
         if (recordForSlot) {
-            if (recordForSlot.status === 'UP') {
-                barClass = 'history-bar-up';
-            } else if (recordForSlot.status === 'HIGH_LATENCY') {
-                barClass = 'history-bar-high-latency';
-            } else if (recordForSlot.status === 'TIMEOUT') {
-                barClass = 'history-bar-timeout';
-            } else if (['DOWN', 'ERROR'].includes(recordForSlot.status)) {
-                barClass = 'history-bar-down';
-            }
+            barClass = statusBarClass(recordForSlot.status);
             const recordDate = new Date(recordForSlot.timestamp * 1000);
-            titleText = \`\${recordDate.toLocaleString()}: \${recordForSlot.status} (\${recordForSlot.status_code || 'N/A'}), \${formatDurationSeconds(recordForSlot.response_time_ms)}\`;
+            const recordInfo = \`\${recordForSlot.status} (\${recordForSlot.status_code || 'N/A'}), \${formatDurationSeconds(recordForSlot.response_time_ms)}\`;
+            if (recordForSlot.timestamp >= slotStartTimestamp) {
+                // 变化就发生在本槽位内
+                titleText = \`\${recordDate.toLocaleString()}: \${recordInfo}\`;
+            } else {
+                // 由更早的变化前向填充而来
+                titleText = \`\${startHH}:\${startMM} - \${endHH}:\${endMM}: \${recordInfo}（自 \${recordDate.toLocaleString()} 持续）\`;
+            }
+        } else if (!hasAnyRecord && fallbackStatus) {
+            // 24h内无任何变化记录 => 状态恒定 => 当前状态适用于整个窗口
+            barClass = statusBarClass(fallbackStatus);
+            titleText = \`\${startHH}:\${startMM} - \${endHH}:\${endMM}: \${fallbackStatus}（24小时内无状态变化）\`;
         }
 
         historyHtml += \`<div class="history-bar \${barClass}" title="\${titleText}"></div>\`;
@@ -9535,7 +9554,7 @@ async function renderLlmStatusTable(endpoints) {
         row.appendChild(historyCell);
         tableBody.appendChild(row);
 
-        renderSiteHistoryBar(historyContainer, ep.history || []);
+        renderSiteHistoryBar(historyContainer, ep.history || [], ep.last_status);
     }
 
     renderMobileLlmCards(endpoints);
@@ -9582,7 +9601,7 @@ function renderMobileLlmCards(endpoints) {
 
         // 使用统一的历史记录渲染函数
         const historyBarContainer = historyContainer.querySelector('.history-bar-container');
-        renderSiteHistoryBar(historyBarContainer, ep.history || []);
+        renderSiteHistoryBar(historyBarContainer, ep.history || [], ep.last_status);
 
         card.appendChild(cardBody);
         container.appendChild(card);
@@ -9663,7 +9682,7 @@ async function renderGroupedLlmStatusTable(endpoints) {
             \`;
             row.appendChild(historyCell);
             tableBody.appendChild(row);
-            renderSiteHistoryBar(historyContainer, ep.history || []);
+            renderSiteHistoryBar(historyContainer, ep.history || [], ep.last_status);
         });
     });
 
@@ -9742,7 +9761,7 @@ function renderGroupedMobileLlmCards(endpoints) {
                 </div>
             \`;
             cardBody.appendChild(item);
-            renderSiteHistoryBar(item.querySelector('.history-bar-container'), ep.history || []);
+            renderSiteHistoryBar(item.querySelector('.history-bar-container'), ep.history || [], ep.last_status);
         });
 
         card.appendChild(cardBody);
