@@ -1004,6 +1004,7 @@ const D1_SCHEMAS = {
       site_id TEXT NOT NULL,
       timestamp INTEGER NOT NULL,
       status TEXT NOT NULL,
+      previous_status TEXT,
       status_code INTEGER,
       response_time_ms INTEGER,
       FOREIGN KEY(site_id) REFERENCES monitored_sites(id) ON DELETE CASCADE
@@ -1075,6 +1076,7 @@ const D1_SCHEMAS = {
       endpoint_id TEXT NOT NULL,
       timestamp INTEGER NOT NULL,
       status TEXT NOT NULL,
+      previous_status TEXT,
       status_code INTEGER,
       response_time_ms INTEGER,
       output_preview TEXT,
@@ -1101,6 +1103,8 @@ async function applySchemaAlterations(db) {
   const alterStatements = [
     "ALTER TABLE monitored_sites ADD COLUMN last_notified_down_at INTEGER DEFAULT NULL",
     "ALTER TABLE servers ADD COLUMN last_notified_down_at INTEGER DEFAULT NULL",
+    "ALTER TABLE site_status_history ADD COLUMN previous_status TEXT",
+    "ALTER TABLE llm_status_history ADD COLUMN previous_status TEXT",
     "ALTER TABLE metrics ADD COLUMN uptime INTEGER DEFAULT NULL",
     "ALTER TABLE admin_credentials ADD COLUMN password_hash TEXT",
     "ALTER TABLE admin_credentials ADD COLUMN created_at INTEGER",
@@ -3174,7 +3178,7 @@ async function handleApiRequest(request, env, ctx) {
       for (const site of sites) {
         try {
           const { results: historyResults } = await env.DB.prepare(`
-            SELECT timestamp, status, status_code, response_time_ms
+            SELECT timestamp, status, previous_status, status_code, response_time_ms
             FROM site_status_history
             WHERE site_id = ? AND timestamp >= ?
             ORDER BY timestamp DESC
@@ -3228,7 +3232,7 @@ async function handleApiRequest(request, env, ctx) {
       for (const ep of endpoints) {
         try {
           const { results: historyResults } = await env.DB.prepare(`
-            SELECT timestamp, status, status_code, response_time_ms, output_preview
+            SELECT timestamp, status, previous_status, status_code, response_time_ms, output_preview
             FROM llm_status_history
             WHERE endpoint_id = ? AND timestamp >= ?
             ORDER BY timestamp DESC
@@ -3926,7 +3930,7 @@ async function handleApiRequest(request, env, ctx) {
       const twentyFourHoursAgoSeconds = nowSeconds - (24 * 60 * 60);
 
       const { results } = await env.DB.prepare(`
-        SELECT timestamp, status, status_code, response_time_ms
+        SELECT timestamp, status, previous_status, status_code, response_time_ms
         FROM site_status_history
         WHERE site_id = ? AND timestamp >= ?
         ORDER BY timestamp DESC
@@ -4048,8 +4052,8 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
 
     if (hasStatusChanged) {
       // 状态变化时，同时更新 sites 表和写入 history 表
-      const insertStmt = db.prepare('INSERT INTO site_status_history (site_id, timestamp, status, status_code, response_time_ms) VALUES (?, ?, ?, ?, ?)')
-        .bind(id, checkTime, newStatus, newStatusCode, newResponseTime);
+      const insertStmt = db.prepare('INSERT INTO site_status_history (site_id, timestamp, status, previous_status, status_code, response_time_ms) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(id, checkTime, newStatus, previousStatus, newStatusCode, newResponseTime);
       await db.batch([updateStmt, insertStmt]);
     } else {
       // 状态未变化时，只更新 sites 表，跳过 history 写入以减少 D1 写入量
@@ -4219,8 +4223,8 @@ async function checkLlmEndpointStatus(endpoint, db, ctx) {
 
     if (hasStatusChanged) {
       // 状态变化时，同时更新 endpoints 表和写入 history 表
-      const insertStmt = db.prepare('INSERT INTO llm_status_history (endpoint_id, timestamp, status, status_code, response_time_ms, output_preview) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(id, checkTime, newStatus, newStatusCode, newResponseTime, outputPreview);
+      const insertStmt = db.prepare('INSERT INTO llm_status_history (endpoint_id, timestamp, status, previous_status, status_code, response_time_ms, output_preview) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .bind(id, checkTime, newStatus, previousStatus, newStatusCode, newResponseTime, outputPreview);
       await db.batch([updateStmt, insertStmt]);
     } else {
       // 状态未变化时，只更新 endpoints 表，跳过 history 写入以减少 D1 写入量
@@ -9514,7 +9518,8 @@ async function renderSiteStatusTable(sites) {
 // Render 24h history bar for a site (48 half-hour slots; unified for PC and mobile)
 // 前向填充：history 只记录状态"变化"时刻，因此每个槽位取该槽位结束时刻之前
 // 最近一条变化记录作为该时段状态；若 24h 内完全没有变化记录，说明状态恒定，
-// 整条色带使用当前状态（currentStatus）填充。
+// 整条色带使用当前状态（currentStatus）填充；若存在变化记录，则早于窗口内
+// 最老变化记录的时段使用该记录的 previous_status 回填（变化前持续的状态）。
 function renderSiteHistoryBar(containerElement, history, currentStatus) {
     let historyHtml = '';
     const now = new Date();
@@ -9527,6 +9532,9 @@ function renderSiteHistoryBar(containerElement, history, currentStatus) {
     const hasAnyRecord = records.length > 0;
     // 24h内无任何记录时才可用当前状态回填（状态恒定推导）
     const fallbackStatus = ['UP', 'HIGH_LATENCY', 'TIMEOUT', 'DOWN', 'ERROR'].includes(currentStatus) ? currentStatus : null;
+    // 窗口内最老的变化记录（降序数组末尾）；其 previous_status 是首次变化前
+    // 一直持续的状态，用于回填早于该记录的时段，避免变化后历史色块变灰
+    const oldestRecord = hasAnyRecord ? records[records.length - 1] : null;
 
     const statusBarClass = (status) => {
         if (status === 'UP') return 'history-bar-up';
@@ -9566,6 +9574,10 @@ function renderSiteHistoryBar(containerElement, history, currentStatus) {
                 // 由更早的变化前向填充而来
                 titleText = \`\${startHH}:\${startMM} - \${endHH}:\${endMM}: \${recordInfo}（自 \${recordDate.toLocaleString()} 持续）\`;
             }
+        } else if (oldestRecord && ['UP', 'HIGH_LATENCY', 'TIMEOUT', 'DOWN', 'ERROR'].includes(oldestRecord.previous_status)) {
+            // 早于窗口内最老变化记录的时段：状态为首次变化发生前持续的状态
+            barClass = statusBarClass(oldestRecord.previous_status);
+            titleText = \`\${startHH}:\${startMM} - \${endHH}:\${endMM}: \${oldestRecord.previous_status}（24h内首次变化前即为此状态）\`;
         } else if (!hasAnyRecord && fallbackStatus) {
             // 24h内无任何变化记录 => 状态恒定 => 当前状态适用于整个窗口
             barClass = statusBarClass(fallbackStatus);
