@@ -128,7 +128,7 @@ async function scheduleVpsBatchFlush(env, ctx) {
 
 // ==================== 监控状态阈值常量 ====================
 // HIGH_LATENCY 阈值：成功响应但响应过慢时单独标记，仅展示不触发故障通知
-const WEBSITE_HIGH_LATENCY_MS = 3000;       // 网站HEAD检查 >3s 视为高延迟
+const WEBSITE_HIGH_LATENCY_MS = 3000;       // 网站GET检查 >3s 视为高延迟
 const WEBSITE_CHECK_TIMEOUT_MS = 15000;     // 网站检查超时时间（原10s，提高以容纳高延迟判定）
 const LLM_HIGH_LATENCY_MS = 20000;          // LLM POST+推理 >20s 视为高延迟
 const DEFAULT_LLM_TIMEOUT_MS = 45000;       // LLM 默认超时
@@ -995,6 +995,7 @@ const D1_SCHEMAS = {
       last_response_time_ms INTEGER,
       sort_order INTEGER,
       last_notified_down_at INTEGER DEFAULT NULL,
+      check_method TEXT DEFAULT 'GET',
       is_public INTEGER DEFAULT 1
     );`,
 
@@ -1116,7 +1117,8 @@ async function applySchemaAlterations(db) {
     "ALTER TABLE servers ADD COLUMN is_public INTEGER DEFAULT 1",
     "ALTER TABLE monitored_sites ADD COLUMN is_public INTEGER DEFAULT 1",
     "ALTER TABLE monitored_llm_endpoints ADD COLUMN is_public INTEGER DEFAULT 1",
-    "ALTER TABLE monitored_llm_endpoints ADD COLUMN enable_notifications INTEGER DEFAULT 1"
+    "ALTER TABLE monitored_llm_endpoints ADD COLUMN enable_notifications INTEGER DEFAULT 1",
+    "ALTER TABLE monitored_sites ADD COLUMN check_method TEXT DEFAULT 'GET'"
   ];
 
   for (const alterSql of alterStatements) {
@@ -2225,7 +2227,7 @@ async function handleApiRequest(request, env, ctx) {
     try {
       const { results } = await env.DB.prepare(`
         SELECT id, name, url, added_at, last_checked, last_status, last_status_code,
-               last_response_time_ms, sort_order, last_notified_down_at, is_public
+               last_response_time_ms, sort_order, last_notified_down_at, is_public, check_method
         FROM monitored_sites
         ORDER BY sort_order ASC NULLS LAST, name ASC, url ASC
       `).all();
@@ -2261,7 +2263,8 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const { url, name } = await parseJsonSafely(request);
+      const { url, name, check_method } = await parseJsonSafely(request);
+      const method = (check_method === 'HEAD') ? 'HEAD' : 'GET';
 
       if (!url || !isValidHttpUrl(url)) {
         return new Response(JSON.stringify({
@@ -2285,9 +2288,9 @@ async function handleApiRequest(request, env, ctx) {
         : 0;
 
       await env.DB.prepare(`
-        INSERT INTO monitored_sites (id, url, name, added_at, last_status, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).bind(siteId, url, name || '', addedAt, 'PENDING', nextSortOrder).run();
+        INSERT INTO monitored_sites (id, url, name, added_at, last_status, sort_order, check_method)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(siteId, url, name || '', addedAt, 'PENDING', nextSortOrder, method).run();
 
       const siteData = {
         id: siteId,
@@ -2295,11 +2298,12 @@ async function handleApiRequest(request, env, ctx) {
         name: name || '',
         added_at: addedAt,
         last_status: 'PENDING',
-        sort_order: nextSortOrder
+        sort_order: nextSortOrder,
+        check_method: method
       };
 
       // 立即执行健康检查
-      const newSiteForCheck = { id: siteId, url, name: name || '' };
+      const newSiteForCheck = { id: siteId, url, name: name || '', check_method: method };
       if (ctx?.waitUntil) {
         ctx.waitUntil(checkWebsiteStatusOptimized(newSiteForCheck, env.DB, ctx));
 
@@ -2357,7 +2361,8 @@ async function handleApiRequest(request, env, ctx) {
         return createErrorResponse('Invalid site ID', '无效的网站ID', 400, corsHeaders);
       }
 
-      const { url, name } = await request.json();
+      const { url, name, check_method } = await request.json();
+      const method = (check_method === 'HEAD') ? 'HEAD' : 'GET';
       if (!url || !url.trim()) {
         return createErrorResponse('Invalid URL', 'URL不能为空', 400, corsHeaders);
       }
@@ -2367,8 +2372,8 @@ async function handleApiRequest(request, env, ctx) {
       }
 
       const info = await env.DB.prepare(`
-        UPDATE monitored_sites SET url = ?, name = ? WHERE id = ?
-      `).bind(url.trim(), name?.trim() || '', siteId).run();
+        UPDATE monitored_sites SET url = ?, name = ?, check_method = ? WHERE id = ?
+      `).bind(url.trim(), name?.trim() || '', method, siteId).run();
 
       if (info.changes === 0) {
         return createErrorResponse('Site not found', '网站不存在', 404, corsHeaders);
@@ -3966,7 +3971,7 @@ async function handleApiRequest(request, env, ctx) {
 
 // 优化版网站状态检查 - 减少超时时间，使用缓存
 async function checkWebsiteStatusOptimized(site, db, ctx) {
-  const { id, url, name } = site;
+  const { id, url, name, check_method } = site;
   const startTime = Date.now();
   let newStatus = 'PENDING';
   let newStatusCode = null;
@@ -3995,7 +4000,7 @@ async function checkWebsiteStatusOptimized(site, db, ctx) {
   try {
     // 超时时间提高到 WEBSITE_CHECK_TIMEOUT_MS 以容纳高延迟判定（>WEBSITE_HIGH_LATENCY_MS 但未超时）
     const response = await fetch(url, {
-      method: 'HEAD',
+      method: (check_method === 'HEAD' ? 'HEAD' : 'GET'),
       redirect: 'follow',
       signal: AbortSignal.timeout(WEBSITE_CHECK_TIMEOUT_MS)
     });
@@ -4421,7 +4426,7 @@ export default {
 
           // ==================== 网站监控部分 ====================
           const { results: sitesToCheck } = await env.DB.prepare(
-            'SELECT id, url, name FROM monitored_sites'
+            'SELECT id, url, name, check_method FROM monitored_sites'
           ).all();
 
           if (sitesToCheck?.length > 0) {
@@ -6403,6 +6408,14 @@ function getAdminHtml() {
                         <div class="mb-3">
                             <label for="siteUrl" class="form-label">网站URL</label>
                             <input type="url" class="form-control" id="siteUrl" placeholder="https://example.com" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="siteCheckMethod" class="form-label">监控方式</label>
+                            <select class="form-select" id="siteCheckMethod">
+                                <option value="GET" selected>GET（推荐，可唤醒休眠站点）</option>
+                                <option value="HEAD">HEAD（更省流量）</option>
+                            </select>
+                            <div class="form-text">GET 会实际拉取页面，对休眠机制站点更有效；HEAD 只请求响应头，更省资源。</div>
                         </div>
                         <!-- Removed siteEnableFrequentNotifications checkbox -->
                     </form>
@@ -11741,7 +11754,7 @@ function renderSiteTable(sites) {
                 </div>
             </td>
             <td>\${site.name || '-'}</td>
-            <td><a href="\${site.url}" target="_blank" rel="noopener noreferrer">\${site.url}</a></td>
+            <td><a href="\${site.url}" target="_blank" rel="noopener noreferrer">\${site.url}</a> <span class="badge bg-secondary">\${site.check_method || 'GET'}</span></td>
             <td><span class="badge \${statusInfo.class}">\${statusInfo.text}</span></td>
             <td>\${site.last_status_code || '-'}</td>
             <td>\${responseTime}</td>
@@ -11977,6 +11990,7 @@ function showSiteModal(siteIdToEdit = null) {
             siteIdInput.value = site.id;
             document.getElementById('siteName').value = site.name || '';
             document.getElementById('siteUrl').value = site.url;
+            document.getElementById('siteCheckMethod').value = site.check_method || 'GET';
             // document.getElementById('siteEnableFrequentNotifications').checked = site.enable_frequent_down_notifications || false; // Removed
         } else {
             showToast('danger', '未找到要编辑的网站信息');
@@ -11985,6 +11999,7 @@ function showSiteModal(siteIdToEdit = null) {
     } else {
         modalTitle.textContent = '添加监控网站';
         siteIdInput.value = ''; // Clear ID for add mode
+        document.getElementById('siteCheckMethod').value = 'GET';
         // document.getElementById('siteEnableFrequentNotifications').checked = false; // Removed
     }
 
@@ -12002,6 +12017,7 @@ async function saveSite() {
     const siteId = document.getElementById('siteId').value; // Get ID from hidden input
     const siteName = document.getElementById('siteName').value.trim();
     const siteUrl = document.getElementById('siteUrl').value.trim();
+    const siteCheckMethod = document.getElementById('siteCheckMethod').value;
     // const enableFrequentNotifications = document.getElementById('siteEnableFrequentNotifications').checked; // Removed
 
     if (!siteUrl) {
@@ -12015,7 +12031,8 @@ async function saveSite() {
 
     const requestBody = {
         url: siteUrl,
-        name: siteName
+        name: siteName,
+        check_method: siteCheckMethod
         // enable_frequent_down_notifications: enableFrequentNotifications // Removed
     };
     let apiUrl = '/api/admin/sites';
@@ -13277,7 +13294,7 @@ function renderMobileAdminSiteCards(sites) {
         urlRow.className = 'mobile-card-row';
         urlRow.innerHTML = \`
             <span class="mobile-card-label" style="word-break: break-all;">
-                URL: \${site.url}<a href="\${site.url}" target="_blank" rel="noopener noreferrer" class="text-decoration-none" style="margin-left: 4px;"><i class="bi bi-box-arrow-up-right"></i></a>
+                URL: \${site.url}<a href="\${site.url}" target="_blank" rel="noopener noreferrer" class="text-decoration-none" style="margin-left: 4px;"><i class="bi bi-box-arrow-up-right"></i></a><span class="badge bg-secondary ms-1">\${site.check_method || 'GET'}</span>
             </span>
         \`;
         cardBody.appendChild(urlRow);
